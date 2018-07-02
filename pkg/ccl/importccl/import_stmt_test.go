@@ -1938,3 +1938,21 @@ func TestImportPgDump(t *testing.T) {
 		})
 	}
 }
+
+func TestPgDumpRistret(t *testing.T) {
+	t.Skip()
+	defer leaktest.AfterTest(t)()
+
+	const (
+		nodes = 1
+	)
+	ctx := context.Background()
+	baseDir := filepath.Join("testdata")
+	args := base.TestServerArgs{ExternalIODir: baseDir}
+	tc := testcluster.StartTestCluster(t, nodes, base.TestClusterArgs{ServerArgs: args})
+	defer tc.Stopper().Stop(ctx)
+	conn := tc.Conns[0]
+	sqlDB := sqlutils.MakeSQLRunner(conn)
+
+	sqlDB.Exec(t, `IMPORT PGDUMP ($1)`, "nodelocal:///pgdump/ristret.sql")
+}

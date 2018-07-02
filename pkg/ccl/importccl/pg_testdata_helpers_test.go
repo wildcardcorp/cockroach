@@ -27,7 +27,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 )
 
-var rewritePostgresTestData = envutil.EnvOrDefaultBool("COCKROACH_REWRITE_POSTGRES_TESTDATA", false)
+var rewritePostgresTestData = envutil.EnvOrDefaultBool("COCKROACH_REWRITE_POSTGRES_TESTDATA", true)
 
 var simplePostgresTestRows = func() []simpleTestRow {
 	badChars := []rune{'a', ';', '\n', ',', '"', '\\', '\r', '<', '\t', '✅', 'π', rune(10), rune(2425), rune(5183), utf8.RuneError}
@@ -243,7 +243,8 @@ func pgdump(t *testing.T, dest string, tables ...string) {
 	for _, table := range tables {
 		args = append(args, `-t`, table)
 	}
-	out, err := exec.Command(`pg_dump`, args...).CombinedOutput()
+	args = append([]string{"exec", "postgres", "pg_dump"}, args...)
+	out, err := exec.Command("docker", args...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s: %s", err, out)
 	}
