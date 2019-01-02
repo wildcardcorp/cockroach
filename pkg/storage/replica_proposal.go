@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/coreos/etcd/raft"
 	"github.com/kr/pretty"
@@ -74,9 +75,10 @@ type ProposalData struct {
 	// Always use ProposalData.finishRaftApplication().
 	doneCh chan proposalResult
 
-	// Local contains the results of evaluating the request
-	// tying the upstream evaluation of the request to the
-	// downstream application of the command.
+	// Local contains the results of evaluating the request tying the upstream
+	// evaluation of the request to the downstream application of the command.
+	// Nil when the proposal came from another node (i.e. the evaluation wasn't
+	// done here).
 	Local *result.LocalResult
 
 	// Request is the client's original BatchRequest.
@@ -259,13 +261,25 @@ func (r *Replica) leasePostApply(ctx context.Context, newLease roachpb.Lease) {
 	// by the previous lease holder.
 	r.mu.Lock()
 	r.mu.state.Lease = &newLease
+	expirationBasedLease := r.requiresExpiringLeaseRLocked()
 	r.mu.Unlock()
 
-	// Gossip the first range whenever its lease is acquired. We check to
-	// make sure the lease is active so that a trailing replica won't process
-	// an old lease request and attempt to gossip the first range.
+	// Gossip the first range whenever its lease is acquired. We check to make
+	// sure the lease is active so that a trailing replica won't process an old
+	// lease request and attempt to gossip the first range.
 	if leaseChangingHands && iAmTheLeaseHolder && r.IsFirstRange() && r.IsLeaseValid(newLease, r.store.Clock().Now()) {
 		r.gossipFirstRange(ctx)
+	}
+
+	// Whenever we first acquire an expiration-based lease, notify the lease
+	// renewer worker that we want it to keep proactively renewing the lease
+	// before it expires.
+	if leaseChangingHands && iAmTheLeaseHolder && expirationBasedLease && r.IsLeaseValid(newLease, r.store.Clock().Now()) {
+		r.store.renewableLeases.Store(int64(r.RangeID), unsafe.Pointer(r))
+		select {
+		case r.store.renewableLeasesSignal <- struct{}{}:
+		default:
+		}
 	}
 
 	if leaseChangingHands && !iAmTheLeaseHolder {
@@ -274,7 +288,8 @@ func (r *Replica) leasePostApply(ctx context.Context, newLease roachpb.Lease) {
 		r.txnWaitQueue.Clear(true /* disable */)
 	}
 
-	if !iAmTheLeaseHolder && r.IsLeaseValid(newLease, r.store.Clock().Now()) {
+	if !iAmTheLeaseHolder && r.IsLeaseValid(newLease, r.store.Clock().Now()) &&
+		!r.store.TestingKnobs().DisableLeaderFollowsLeaseholder {
 		// If this replica is the raft leader but it is not the new lease holder,
 		// then try to transfer the raft leadership to match the lease. We like it
 		// when leases and raft leadership are collocated because that facilitates

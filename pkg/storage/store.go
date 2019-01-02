@@ -406,6 +406,12 @@ type Store struct {
 	// data destruction.
 	snapshotApplySem chan struct{}
 
+	// Track newly-acquired expiration-based leases that we want to proactively
+	// renew. An object is sent on the signal whenever a new entry is added to
+	// the map.
+	renewableLeases       syncutil.IntMap // map[roachpb.RangeID]*Replica
+	renewableLeasesSignal chan struct{}
+
 	// draining holds a bool which indicates whether this store is draining. See
 	// SetDraining() for a more detailed explanation of behavior changes.
 	//
@@ -705,6 +711,9 @@ type StoreTestingKnobs struct {
 	// allowing the replica to use the lease that it had in a previous life (in
 	// case the tests persisted the engine used in said previous life).
 	DontPreventUseOfOldLeaseOnStart bool
+	// DisableAutomaticLeaseRenewal enables turning off the background worker
+	// that attempts to automatically renew expiration-based leases.
+	DisableAutomaticLeaseRenewal bool
 	// LeaseRequestEvent, if set, is called when replica.requestLeaseLocked() is
 	// called to acquire a new lease. This can be used to assert that a request
 	// triggers a lease acquisition.
@@ -733,6 +742,9 @@ type StoreTestingKnobs struct {
 	DisableScanner bool
 	// DisablePeriodicGossips disables periodic gossiping.
 	DisablePeriodicGossips bool
+	// DisableLeaderFollowsLeaseholder disables attempts to transfer raft
+	// leadership when it diverges from the range's leaseholder.
+	DisableLeaderFollowsLeaseholder bool
 	// DisableRefreshReasonTicks disables refreshing pending commands when a new
 	// leader is discovered.
 	DisableRefreshReasonNewLeader bool
@@ -742,6 +754,10 @@ type StoreTestingKnobs struct {
 	// DisableRefreshReasonTicks disables refreshing pending commands
 	// periodically.
 	DisableRefreshReasonTicks bool
+	// RefreshReasonTicksPeriod overrides the default period over which
+	// pending commands are refreshed. The period is specified as a multiple
+	// of Raft group ticks.
+	RefreshReasonTicksPeriod int
 	// DisableProcessRaft disables the process raft loop.
 	DisableProcessRaft bool
 	// DisableLastProcessedCheck disables checking on replica queue last processed times.
@@ -882,6 +898,8 @@ func NewStore(cfg StoreConfig, eng engine.Engine, nodeDesc *roachpb.NodeDescript
 	s.metrics.registry.AddMetricStruct(s.compactor.Metrics)
 
 	s.snapshotApplySem = make(chan struct{}, cfg.concurrentSnapshotApplyLimit)
+
+	s.renewableLeasesSignal = make(chan struct{})
 
 	s.bulkIOWriteLimiter = rate.NewLimiter(rate.Limit(bulkIOWriteLimit.Get(&cfg.Settings.SV)), bulkIOWriteBurst)
 	bulkIOWriteLimit.SetOnChange(&cfg.Settings.SV, func() {
@@ -1366,6 +1384,10 @@ func (s *Store) Start(ctx context.Context, stopper *stop.Stopper) error {
 		log.Event(ctx, "computed initial metrics")
 	}
 
+	if !s.cfg.TestingKnobs.DisableAutomaticLeaseRenewal {
+		s.startLeaseRenewer(ctx)
+	}
+
 	// Start the storage engine compactor.
 	if envutil.EnvOrDefaultBool("COCKROACH_ENABLE_COMPACTOR", true) {
 		s.compactor.Start(s.AnnotateCtx(context.Background()), s.stopper)
@@ -1473,6 +1495,56 @@ func (s *Store) startGossip() {
 			}
 		})
 	}
+}
+
+// startLeaseRenewer runs an infinite loop in a goroutine which regularly
+// checks whether the store has any expiration-based leases that should be
+// proactively renewed and attempts to continue renewing them.
+//
+// This reduces user-visible latency when range lookups are needed to serve a
+// request and reduces ping-ponging of r1's lease to different replicas as
+// maybeGossipFirstRange is called on each (e.g.  #24753).
+func (s *Store) startLeaseRenewer(ctx context.Context) {
+	// Start a goroutine that watches and proactively renews certain
+	// expiration-based leases.
+	s.stopper.RunWorker(ctx, func(ctx context.Context) {
+		repls := make(map[*Replica]struct{})
+		timer := timeutil.NewTimer()
+		defer timer.Stop()
+
+		// Determine how frequently to attempt to ensure that we have each lease.
+		// The divisor used here is somewhat arbitrary, but needs to be large
+		// enough to ensure we'll attempt to renew the lease reasonably early
+		// within the RangeLeaseRenewalDuration time window. This means we'll wake
+		// up more often that strictly necessary, but it's more maintainable than
+		// attempting to accurately determine exactly when each iteration of a
+		// lease expires and when we should attempt to renew it as a result.
+		renewalDuration := s.cfg.RangeLeaseActiveDuration() / 5
+		for {
+			s.renewableLeases.Range(func(k int64, v unsafe.Pointer) bool {
+				repl := (*Replica)(v)
+				annotatedCtx := repl.AnnotateCtx(ctx)
+				if _, pErr := repl.redirectOnOrAcquireLease(annotatedCtx); pErr != nil {
+					if _, ok := pErr.GetDetail().(*roachpb.NotLeaseHolderError); !ok {
+						log.Warningf(annotatedCtx, "failed to proactively renew lease: %s", pErr)
+					}
+					s.renewableLeases.Delete(k)
+				}
+				return true
+			})
+
+			if len(repls) > 0 {
+				timer.Reset(renewalDuration)
+			}
+			select {
+			case <-s.renewableLeasesSignal:
+			case <-timer.C:
+				timer.Read = true
+			case <-s.stopper.ShouldStop():
+				return
+			}
+		}
+	})
 }
 
 // systemGossipUpdate is a callback for gossip updates to
@@ -1797,7 +1869,7 @@ func (s *Store) GetReplica(rangeID roachpb.RangeID) (*Replica, error) {
 	if value, ok := s.mu.replicas.Load(int64(rangeID)); ok {
 		return (*Replica)(value), nil
 	}
-	return nil, roachpb.NewRangeNotFoundError(rangeID)
+	return nil, roachpb.NewRangeNotFoundError(rangeID, s.StoreID())
 }
 
 // LookupReplica looks up a replica via binary search over the
@@ -2429,7 +2501,7 @@ func (s *Store) removeReplicaImpl(
 	rep.mu.Lock()
 	rep.cancelPendingCommandsLocked()
 	rep.mu.internalRaftGroup = nil
-	rep.mu.destroyStatus.Set(roachpb.NewRangeNotFoundError(rep.RangeID), destroyReasonRemoved)
+	rep.mu.destroyStatus.Set(roachpb.NewRangeNotFoundError(rep.RangeID, rep.store.StoreID()), destroyReasonRemoved)
 	rep.mu.Unlock()
 	rep.readOnlyCmdMu.Unlock()
 
@@ -3503,7 +3575,8 @@ func (s *Store) HandleRaftResponse(ctx context.Context, resp *RaftMessageRespons
 			// could be re-added with a higher replicaID, in which this error is
 			// cleared in setReplicaIDRaftMuLockedMuLocked.
 			if repl.mu.destroyStatus.IsAlive() {
-				repl.mu.destroyStatus.Set(roachpb.NewRangeNotFoundError(repl.RangeID), destroyReasonRemovalPending)
+				storeID := repl.store.StoreID()
+				repl.mu.destroyStatus.Set(roachpb.NewRangeNotFoundError(repl.RangeID, storeID), destroyReasonRemovalPending)
 			}
 			repl.mu.Unlock()
 
@@ -3711,12 +3784,42 @@ func sendSnapshot(
 
 	firstIndex := header.State.TruncatedState.Index + 1
 	endIndex := snap.RaftSnap.Metadata.Index + 1
-	logEntries := make([][]byte, 0, endIndex-firstIndex)
 
+	preallocSize := endIndex - firstIndex
+	const maxPreallocSize = 1000
+	if preallocSize > maxPreallocSize {
+		// It's possible for the raft log to become enormous in certain
+		// sustained failure conditions. We may bail out of the snapshot
+		// process early in scanFunc, but in the worst case this
+		// preallocation is enough to run the server out of memory. Limit
+		// the size of the buffer we will preallocate.
+		preallocSize = maxPreallocSize
+	}
+	logEntries := make([][]byte, 0, preallocSize)
+
+	var raftLogBytes int64
 	scanFunc := func(kv roachpb.KeyValue) (bool, error) {
 		bytes, err := kv.Value.GetBytes()
 		if err == nil {
 			logEntries = append(logEntries, bytes)
+			raftLogBytes += int64(len(bytes))
+			if snap.snapType == snapTypePreemptive && raftLogBytes > 4*raftLogMaxSize {
+				// If the raft log is too large, abort the snapshot instead of
+				// potentially running out of memory. However, if this is a
+				// raft-initiated snapshot (instead of a preemptive one), we
+				// have a dilemma. It may be impossible to truncate the raft
+				// log until we have caught up a peer with a snapshot. Since
+				// we don't know the exact size at which we will run out of
+				// memory, we err on the size of allowing the snapshot if it
+				// is raft-initiated, while aborting preemptive snapshots at a
+				// reasonable threshold. (Empirically, this is good enough:
+				// the situations that result in large raft logs have not been
+				// observed to result in raft-initiated snapshots).
+				return false, errors.Errorf(
+					"aborting snapshot because raft log is too large "+
+						"(%d bytes after processing %d of %d entries)",
+					raftLogBytes, len(logEntries), endIndex-firstIndex)
+			}
 		}
 		return false, err
 	}

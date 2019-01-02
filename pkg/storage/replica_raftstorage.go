@@ -17,6 +17,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/coreos/etcd/raft"
@@ -76,8 +77,7 @@ func (r *replicaRaftStorage) InitialState() (raftpb.HardState, raftpb.ConfState,
 
 // Entries implements the raft.Storage interface. Note that maxBytes is advisory
 // and this method will always return at least one entry even if it exceeds
-// maxBytes. Passing maxBytes equal to zero disables size checking. Sideloaded
-// proposals count towards maxBytes with their payloads inlined.
+// maxBytes. Sideloaded proposals count towards maxBytes with their payloads inlined.
 func (r *replicaRaftStorage) Entries(lo, hi, maxBytes uint64) ([]raftpb.Entry, error) {
 	readonly := r.store.Engine().NewReadOnly()
 	defer readonly.Close()
@@ -114,10 +114,11 @@ func entries(
 	}
 	ents := make([]raftpb.Entry, 0, n)
 
-	ents, size, hitIndex := eCache.getEntries(ents, rangeID, lo, hi, maxBytes)
+	ents, size, hitIndex, exceededMaxBytes := eCache.getEntries(ents, rangeID, lo, hi, maxBytes)
+
 	// Return results if the correct number of results came back or if
 	// we ran into the max bytes limit.
-	if uint64(len(ents)) == hi-lo || (maxBytes > 0 && size > maxBytes) {
+	if uint64(len(ents)) == hi-lo || exceededMaxBytes {
 		return ents, nil
 	}
 
@@ -130,7 +131,6 @@ func entries(
 	canCache := true
 
 	var ent raftpb.Entry
-	exceededMaxBytes := false
 	scanFunc := func(kv roachpb.KeyValue) (bool, error) {
 		if err := kv.Value.GetProto(&ent); err != nil {
 			return false, err
@@ -158,9 +158,13 @@ func entries(
 
 		// Note that we track the size of proposals with payloads inlined.
 		size += uint64(ent.Size())
-
+		if size > maxBytes {
+			exceededMaxBytes = true
+			if len(ents) > 0 {
+				return exceededMaxBytes, nil
+			}
+		}
 		ents = append(ents, ent)
-		exceededMaxBytes = maxBytes > 0 && size > maxBytes
 		return exceededMaxBytes, nil
 	}
 
@@ -274,7 +278,7 @@ func term(
 ) (uint64, error) {
 	// entries() accepts a `nil` sideloaded storage and will skip inlining of
 	// sideloaded entries. We only need the term, so this is what we do.
-	ents, err := entries(ctx, rsl, eng, rangeID, eCache, nil /* sideloaded */, i, i+1, 0)
+	ents, err := entries(ctx, rsl, eng, rangeID, eCache, nil /* sideloaded */, i, i+1, math.MaxUint64 /* maxBytes */)
 	if err == raft.ErrCompacted {
 		ts, err := rsl.LoadTruncatedState(ctx, eng)
 		if err != nil {
@@ -440,6 +444,7 @@ type OutgoingSnapshot struct {
 	// sideloaded storage in the meantime.
 	WithSideloaded func(func(sideloadStorage) error) error
 	RaftEntryCache *raftEntryCache
+	snapType       string
 }
 
 // Close releases the resources associated with the snapshot.
@@ -534,6 +539,7 @@ func snapshot(
 				ConfState: cs,
 			},
 		},
+		snapType: snapType,
 	}, nil
 }
 
@@ -636,11 +642,7 @@ const (
 )
 
 func clearRangeData(
-	ctx context.Context,
-	desc *roachpb.RangeDescriptor,
-	keyCount int64,
-	eng engine.Engine,
-	batch engine.Batch,
+	ctx context.Context, desc *roachpb.RangeDescriptor, eng engine.Engine, batch engine.Batch,
 ) error {
 	iter := eng.NewIterator(false)
 	defer iter.Close()
@@ -653,12 +655,33 @@ func clearRangeData(
 	// perhaps we should fix RocksDB to handle large numbers of tombstones in an
 	// sstable better.
 	const clearRangeMinKeys = 64
-	const metadataRanges = 2
-	for i, keyRange := range rditer.MakeAllKeyRanges(desc) {
-		// Metadata ranges always have too few keys to justify ClearRange (see
-		// above), but the data range's key count needs to be explicitly checked.
+	keyRanges := rditer.MakeAllKeyRanges(desc)
+	for _, keyRange := range keyRanges {
+		// Peek into the range to see whether it's large enough to justify
+		// ClearRange. Note that the work done here is bounded by
+		// clearRangeMinKeys, so it will be fairly cheap even for large
+		// ranges.
+		//
+		// TODO(bdarnell): Move this into ClearIterRange so we don't have
+		// to do this scan twice.
+		count := 0
+		iter.Seek(keyRange.Start)
+		for {
+			valid, err := iter.Valid()
+			if err != nil {
+				return err
+			}
+			if !valid || !iter.Key().Less(keyRange.End) {
+				break
+			}
+			count++
+			if count > clearRangeMinKeys {
+				break
+			}
+			iter.Next()
+		}
 		var err error
-		if i >= metadataRanges && keyCount >= clearRangeMinKeys {
+		if count > clearRangeMinKeys {
 			err = batch.ClearRange(keyRange.Start, keyRange.End)
 		} else {
 			err = batch.ClearIterRange(iter, keyRange.Start, keyRange.End)
@@ -687,7 +710,6 @@ func (r *Replica) applySnapshot(
 
 	r.mu.RLock()
 	replicaID := r.mu.replicaID
-	keyCount := r.mu.state.Stats.KeyCount
 	r.mu.RUnlock()
 
 	snapType := inSnap.snapType
@@ -764,7 +786,7 @@ func (r *Replica) applySnapshot(
 	// Delete everything in the range and recreate it from the snapshot.
 	// We need to delete any old Raft log entries here because any log entries
 	// that predate the snapshot will be orphaned and never truncated or GC'd.
-	if err := clearRangeData(ctx, s.Desc, keyCount, r.store.Engine(), batch); err != nil {
+	if err := clearRangeData(ctx, s.Desc, r.store.Engine(), batch); err != nil {
 		return err
 	}
 	stats.clear = timeutil.Now()

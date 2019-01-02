@@ -250,7 +250,7 @@
     "raft",
     "raft/raftpb",
   ]
-  revision = "d6888f56de7436287397d8ac2ff448dae0091ddc"
+  revision = "5570a8e4af068992a8dc90ce936d05cfbaf1d320"
   source = "https://github.com/cockroachdb/etcd"
 
 [[projects]]
@@ -693,8 +693,8 @@
     "unix",
     "unix/sigtramp",
   ]
-  revision = "69b759d6ff84df6bbd39846dae3670625cc0361b"
-  version = "v1.7"
+  revision = "e51c97423f9efc6dcf77b66d08a582abd91c0bd6"
+  version = "v1.8"
 
 [[projects]]
   branch = "master"
