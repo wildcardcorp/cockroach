@@ -1,16 +1,12 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package server
 
@@ -22,17 +18,22 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
-	"github.com/cockroachdb/cockroach/pkg/storage"
-	"github.com/cockroachdb/cockroach/pkg/storage/storagepb"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestLogGC(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	skip.UnderRace(t, "takes >1 min under race")
+
 	a := assert.New(t)
 	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{})
 	ts := s.(*TestServer)
@@ -64,7 +65,7 @@ func TestLogGC(t *testing.T) {
 				timestamp,
 				testRangeID,
 				1, // storeID
-				storagepb.RangeLogEventType_add.String(),
+				kvserverpb.RangeLogEventType_add_voter.String(),
 			)
 			a.NoError(err)
 		}
@@ -139,6 +140,7 @@ func TestLogGC(t *testing.T) {
 
 func TestLogGCTrigger(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
 	systemLogRowCount := func(ctx context.Context, db *gosql.DB, table string, ts time.Time) int {
 		var count int
 		err := db.QueryRowContext(ctx,
@@ -180,7 +182,7 @@ func TestLogGCTrigger(t *testing.T) {
 
 	params := base.TestServerArgs{
 		Knobs: base.TestingKnobs{
-			Store: &storage.StoreTestingKnobs{
+			Store: &kvserver.StoreTestingKnobs{
 				SystemLogsGCGCDone: gcDone,
 				SystemLogsGCPeriod: time.Nanosecond,
 			},
@@ -189,6 +191,21 @@ func TestLogGCTrigger(t *testing.T) {
 
 	s, db, _ := serverutils.StartServer(t, params)
 	ctx := context.Background()
+
+	// Insert something in the rangelog table, otherwise it's empty for new
+	// clusters.
+	if _, err := db.Exec(
+		`INSERT INTO system.rangelog (
+             timestamp, "rangeID", "storeID", "eventType"
+           ) VALUES (
+             cast(now() - interval '10s' as timestamp), -- cast from timestamptz
+						 100, 1, $1
+          )`,
+		kvserverpb.RangeLogEventType_add_voter.String(),
+	); err != nil {
+		t.Fatal(err)
+	}
+
 	defer s.Stopper().Stop(ctx)
 
 	for _, tc := range testCases {
@@ -213,7 +230,7 @@ func TestLogGCTrigger(t *testing.T) {
 				maxTS,
 			)
 
-			_, err = db.Exec(fmt.Sprintf("SET CLUSTER SETTING server.%s.ttl='1ns'", tc.table))
+			_, err = db.Exec(fmt.Sprintf("SET CLUSTER SETTING server.%s.ttl='1us'", tc.table))
 			a.NoError(err)
 
 			<-gcDone

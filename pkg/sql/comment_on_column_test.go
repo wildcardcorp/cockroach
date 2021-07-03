@@ -1,35 +1,35 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package sql_test
 
 import (
 	"context"
 	gosql "database/sql"
+	"fmt"
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/errors"
 )
 
 func TestCommentOnColumn(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
 
 	params, _ := tests.CreateTestServerParams()
 	s, db, _ := serverutils.StartServer(t, params)
-	defer s.Stopper().Stop(context.TODO())
+	defer s.Stopper().Stop(context.Background())
 
 	if _, err := db.Exec(`
 		CREATE DATABASE d;
@@ -94,10 +94,11 @@ func TestCommentOnColumn(t *testing.T) {
 
 func TestCommentOnColumnTransaction(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
 
 	params, _ := tests.CreateTestServerParams()
 	s, db, _ := serverutils.StartServer(t, params)
-	defer s.Stopper().Stop(context.TODO())
+	defer s.Stopper().Stop(context.Background())
 
 	if _, err := db.Exec(`
 		CREATE DATABASE d;
@@ -114,10 +115,11 @@ func TestCommentOnColumnTransaction(t *testing.T) {
 
 func TestCommentOnColumnWhenDropTable(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
 
 	params, _ := tests.CreateTestServerParams()
 	s, db, _ := serverutils.StartServer(t, params)
-	defer s.Stopper().Stop(context.TODO())
+	defer s.Stopper().Stop(context.Background())
 
 	if _, err := db.Exec(`
 		CREATE DATABASE d;
@@ -138,7 +140,7 @@ func TestCommentOnColumnWhenDropTable(t *testing.T) {
 	row := db.QueryRow(`SELECT comment FROM system.comments LIMIT 1`)
 	var comment string
 	err := row.Scan(&comment)
-	if err != gosql.ErrNoRows {
+	if !errors.Is(err, gosql.ErrNoRows) {
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -149,10 +151,11 @@ func TestCommentOnColumnWhenDropTable(t *testing.T) {
 
 func TestCommentOnColumnWhenDropColumn(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
 
 	params, _ := tests.CreateTestServerParams()
 	s, db, _ := serverutils.StartServer(t, params)
-	defer s.Stopper().Stop(context.TODO())
+	defer s.Stopper().Stop(context.Background())
 
 	if _, err := db.Exec(`
 		CREATE DATABASE d;
@@ -173,11 +176,51 @@ func TestCommentOnColumnWhenDropColumn(t *testing.T) {
 	row := db.QueryRow(`SELECT comment FROM system.comments LIMIT 1`)
 	var comment string
 	err := row.Scan(&comment)
-	if err != gosql.ErrNoRows {
+	if !errors.Is(err, gosql.ErrNoRows) {
 		if err != nil {
 			t.Fatal(err)
 		}
 
 		t.Fatal("comment remain")
+	}
+}
+
+func TestCommentOnAlteredColumn(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	params, _ := tests.CreateTestServerParams()
+	s, db, _ := serverutils.StartServer(t, params)
+	defer s.Stopper().Stop(context.Background())
+	expectedComment := "expected comment"
+
+	if _, err := db.Exec(`
+		CREATE DATABASE d;
+		SET DATABASE = d;
+		SET enable_experimental_alter_column_type_general = true;
+		CREATE TABLE t (c INT);
+	`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.Exec(`COMMENT ON COLUMN t.c IS 'first comment'`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.Exec(`ALTER TABLE t ALTER COLUMN c TYPE character varying;`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(
+		fmt.Sprintf(`COMMENT ON COLUMN t.c IS '%s'`, expectedComment)); err != nil {
+		t.Fatal(err)
+	}
+	row := db.QueryRow(`SELECT comment FROM system.comments LIMIT 1`)
+	var comment string
+	if err := row.Scan(&comment); err != nil {
+		t.Fatal(err)
+	}
+
+	if expectedComment != comment {
+		t.Fatalf("expected comment %v, got %v", expectedComment, comment)
 	}
 }

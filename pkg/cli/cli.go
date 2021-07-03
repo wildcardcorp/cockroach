@@ -1,41 +1,40 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package cli
 
 import (
+	"bytes"
 	"context"
-	"flag"
 	"fmt"
 	"math/rand"
 	"os"
 	"strings"
 	"text/tabwriter"
 
-	_ "github.com/benesch/cgosymbolizer" // calls runtime.SetCgoTraceback on import
 	"github.com/cockroachdb/cockroach/pkg/build"
+	"github.com/cockroachdb/cockroach/pkg/cli/exit"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/logflags"
+	"github.com/cockroachdb/cockroach/pkg/util/log/logcrash"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	// intentionally not all the workloads in pkg/ccl/workloadccl/allccl
-	_ "github.com/cockroachdb/cockroach/pkg/workload/bank" // registers workloads
+	_ "github.com/cockroachdb/cockroach/pkg/workload/bank"       // registers workloads
+	_ "github.com/cockroachdb/cockroach/pkg/workload/bulkingest" // registers workloads
 	workloadcli "github.com/cockroachdb/cockroach/pkg/workload/cli"
 	_ "github.com/cockroachdb/cockroach/pkg/workload/examples" // registers workloads
 	_ "github.com/cockroachdb/cockroach/pkg/workload/kv"       // registers workloads
+	_ "github.com/cockroachdb/cockroach/pkg/workload/movr"     // registers workloads
 	_ "github.com/cockroachdb/cockroach/pkg/workload/tpcc"     // registers workloads
+	_ "github.com/cockroachdb/cockroach/pkg/workload/tpch"     // registers workloads
 	_ "github.com/cockroachdb/cockroach/pkg/workload/ycsb"     // registers workloads
-	"github.com/pkg/errors"
+	"github.com/cockroachdb/errors"
 	"github.com/spf13/cobra"
 )
 
@@ -50,62 +49,135 @@ func Main() {
 		os.Args = append(os.Args, "help")
 	}
 
-	// Change the logging defaults for the main cockroach binary.
-	// The value is overridden after command-line parsing.
-	if err := flag.Lookup(logflags.LogToStderrName).Value.Set("NONE"); err != nil {
-		panic(err)
+	// We ignore the error in this lookup, because
+	// we want cobra to handle lookup errors with a verbose
+	// help message in Run() below.
+	cmd, _, _ := cockroachCmd.Find(os.Args[1:])
+
+	cmdName := commandName(cmd)
+
+	err := doMain(cmd, cmdName)
+	errCode := exit.Success()
+	if err != nil {
+		// Display the error and its details/hints.
+		cliOutputError(stderr, err, true /*showSeverity*/, false /*verbose*/)
+
+		// Remind the user of which command was being run.
+		fmt.Fprintf(stderr, "Failed running %q\n", cmdName)
+
+		// Finally, extract the error code, as optionally specified
+		// by the sub-command.
+		errCode = exit.UnspecifiedError()
+		var cliErr *cliError
+		if errors.As(err, &cliErr) {
+			errCode = cliErr.exitCode
+		}
 	}
 
-	cmdName := commandName(os.Args[1:])
+	exit.WithCode(errCode)
+}
 
-	log.SetupCrashReporter(
+func doMain(cmd *cobra.Command, cmdName string) error {
+	if cmd != nil {
+		// Apply the configuration defaults from environment variables.
+		// This must occur before the parameters are parsed by cobra, so
+		// that the command-line flags can override the defaults in
+		// environment variables.
+		if err := processEnvVarDefaults(cmd); err != nil {
+			return err
+		}
+
+		if !cmdHasCustomLoggingSetup(cmd) {
+			// the customLoggingSetupCmds do their own calls to setupLogging().
+			//
+			// We use a PreRun function, to ensure setupLogging() is only
+			// called after the command line flags have been parsed.
+			//
+			// NB: we cannot use PersistentPreRunE,like in flags.go, because
+			// overriding that here will prevent the persistent pre-run from
+			// running on parent commands. (See the difference between PreRun
+			// and PersistentPreRun in `(*cobra.Command) execute()`.)
+			wrapped := cmd.PreRunE
+			cmd.PreRunE = func(cmd *cobra.Command, args []string) error {
+				if wrapped != nil {
+					if err := wrapped(cmd, args); err != nil {
+						return err
+					}
+				}
+
+				return setupLogging(context.Background(), cmd,
+					false /* isServerCmd */, true /* applyConfig */)
+			}
+		}
+	}
+
+	logcrash.SetupCrashReporter(
 		context.Background(),
 		cmdName,
 	)
 
-	defer log.RecoverAndReportPanic(context.Background(), &serverCfg.Settings.SV)
+	defer logcrash.RecoverAndReportPanic(context.Background(), &serverCfg.Settings.SV)
 
-	errCode := 0
-	if err := Run(os.Args[1:]); err != nil {
-		fmt.Fprintf(stderr, "Failed running %q\n", cmdName)
-		errCode = 1
-		if ec, ok := errors.Cause(err).(*cliError); ok {
-			errCode = ec.exitCode
+	return Run(os.Args[1:])
+}
+
+func cmdHasCustomLoggingSetup(thisCmd *cobra.Command) bool {
+	if thisCmd == nil {
+		return false
+	}
+	for _, cmd := range customLoggingSetupCmds {
+		if cmd == thisCmd {
+			return true
 		}
 	}
-	os.Exit(errCode)
+	hasCustomLogging := false
+	thisCmd.VisitParents(func(parent *cobra.Command) {
+		for _, cmd := range customLoggingSetupCmds {
+			if cmd == parent {
+				hasCustomLogging = true
+			}
+		}
+	})
+	return hasCustomLogging
 }
 
 // commandName computes the name of the command that args would invoke. For
 // example, the full name of "cockroach debug zip" is "debug zip". If args
 // specify a nonexistent command, commandName returns "cockroach".
-func commandName(args []string) string {
+func commandName(cmd *cobra.Command) string {
 	rootName := cockroachCmd.CommandPath()
-	// Ask Cobra to find the command so that flags and their arguments are
-	// ignored. The name of "cockroach --log-dir foo start" is "start", not
-	// "--log-dir" or "foo".
-	if cmd, _, _ := cockroachCmd.Find(os.Args[1:]); cmd != nil {
+	if cmd != nil {
 		return strings.TrimPrefix(cmd.CommandPath(), rootName+" ")
 	}
 	return rootName
 }
 
 type cliError struct {
-	exitCode int
+	exitCode exit.Code
 	severity log.Severity
 	cause    error
 }
 
 func (e *cliError) Error() string { return e.cause.Error() }
 
+// Cause implements causer.
+func (e *cliError) Cause() error { return e.cause }
+
+// Format implements fmt.Formatter.
+func (e *cliError) Format(s fmt.State, verb rune) { errors.FormatError(e, s, verb) }
+
+// FormatError implements errors.Formatter.
+func (e *cliError) FormatError(p errors.Printer) error {
+	if p.Detail() {
+		p.Printf("error with exit code: %d", e.exitCode)
+	}
+	return e.cause
+}
+
 // stderr aliases log.OrigStderr; we use an alias here so that tests
 // in this package can redirect the output of CLI commands to stdout
 // to be captured.
 var stderr = log.OrigStderr
-
-// stdin aliases os.Stdin; we use an alias here so that tests in this
-// package can redirect the input of the CLI shell.
-var stdin = os.Stdin
 
 var versionCmd = &cobra.Command{
 	Use:   "version",
@@ -115,22 +187,34 @@ Output build version information.
 `,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		info := build.GetInfo()
-		tw := tabwriter.NewWriter(os.Stdout, 2, 1, 2, ' ', 0)
-		fmt.Fprintf(tw, "Build Tag:    %s\n", info.Tag)
-		fmt.Fprintf(tw, "Build Time:   %s\n", info.Time)
-		fmt.Fprintf(tw, "Distribution: %s\n", info.Distribution)
-		fmt.Fprintf(tw, "Platform:     %s", info.Platform)
-		if info.CgoTargetTriple != "" {
-			fmt.Fprintf(tw, " (%s)", info.CgoTargetTriple)
+		if cliCtx.showVersionUsingOnlyBuildTag {
+			info := build.GetInfo()
+			fmt.Println(info.Tag)
+		} else {
+			fmt.Println(fullVersionString())
 		}
-		fmt.Fprintln(tw)
-		fmt.Fprintf(tw, "Go Version:   %s\n", info.GoVersion)
-		fmt.Fprintf(tw, "C Compiler:   %s\n", info.CgoCompiler)
-		fmt.Fprintf(tw, "Build SHA-1:  %s\n", info.Revision)
-		fmt.Fprintf(tw, "Build Type:   %s\n", info.Type)
-		return tw.Flush()
+		return nil
 	},
+}
+
+func fullVersionString() string {
+	info := build.GetInfo()
+	var buf bytes.Buffer
+	tw := tabwriter.NewWriter(&buf, 2, 1, 2, ' ', 0)
+	fmt.Fprintf(tw, "Build Tag:        %s\n", info.Tag)
+	fmt.Fprintf(tw, "Build Time:       %s\n", info.Time)
+	fmt.Fprintf(tw, "Distribution:     %s\n", info.Distribution)
+	fmt.Fprintf(tw, "Platform:         %s", info.Platform)
+	if info.CgoTargetTriple != "" {
+		fmt.Fprintf(tw, " (%s)", info.CgoTargetTriple)
+	}
+	fmt.Fprintln(tw)
+	fmt.Fprintf(tw, "Go Version:       %s\n", info.GoVersion)
+	fmt.Fprintf(tw, "C Compiler:       %s\n", info.CgoCompiler)
+	fmt.Fprintf(tw, "Build Commit ID:  %s\n", info.Revision)
+	fmt.Fprintf(tw, "Build Type:       %s", info.Type) // No final newline: cobra prints one for us.
+	_ = tw.Flush()
+	return buf.String()
 }
 
 var cockroachCmd = &cobra.Command{
@@ -145,7 +229,17 @@ var cockroachCmd = &cobra.Command{
 	// Commands should manually print usage information when the error is,
 	// in fact, a result of a bad invocation, e.g. too many arguments.
 	SilenceUsage: true,
+	// Disable automatic printing of the error. We want to also print
+	// details and hints, which cobra does not do for us. Instead
+	// we do the printing in Main().
+	SilenceErrors: true,
+	// Version causes cobra to automatically support a --version flag
+	// that reports this string.
+	Version: "details:\n" + fullVersionString() +
+		"\n(use '" + os.Args[0] + " version --build-tag' to display only the build tag)",
 }
+
+var workloadCmd = workloadcli.WorkloadCmd(true /* userFacing */)
 
 func init() {
 	cobra.EnableCommandSorting = false
@@ -156,20 +250,30 @@ func init() {
 			return err
 		}
 		fmt.Fprintln(c.OutOrStderr()) // provide a line break between usage and error
-		return err
+		return &cliError{
+			exitCode: exit.CommandLineFlagError(),
+			cause:    err,
+		}
 	})
 
 	cockroachCmd.AddCommand(
-		StartCmd,
+		startCmd,
+		startSingleNodeCmd,
+		connectCmd,
 		initCmd,
 		certCmd,
+		// TODO(bilal): Uncomment this when the connect command does something useful.
+		// connectCmd,
 		quitCmd,
 
 		sqlShellCmd,
-		userCmd,
-		zoneCmd,
+		stmtDiagCmd,
+		authCmd,
 		nodeCmd,
 		dumpCmd,
+		nodeLocalCmd,
+		userFileCmd,
+		importCmd,
 
 		// Miscellaneous commands.
 		// TODO(pmattis): stats
@@ -178,9 +282,33 @@ func init() {
 		versionCmd,
 		DebugCmd,
 		sqlfmtCmd,
-		workloadcli.WorkloadCmd(true /* userFacing */),
+		workloadCmd,
 		systemBenchCmd,
 	)
+}
+
+// isWorkloadCmd returns true iff cmd is a sub-command of 'workload'.
+func isWorkloadCmd(cmd *cobra.Command) bool {
+	return hasParentCmd(cmd, workloadCmd)
+}
+
+// isDemoCmd returns true iff cmd is a sub-command of `demo`.
+func isDemoCmd(cmd *cobra.Command) bool {
+	return hasParentCmd(cmd, demoCmd)
+}
+
+// hasParentCmd returns true iff cmd is a sub-command of refParent.
+func hasParentCmd(cmd, refParent *cobra.Command) bool {
+	if cmd == refParent {
+		return true
+	}
+	hasParent := false
+	cmd.VisitParents(func(thisParent *cobra.Command) {
+		if thisParent == refParent {
+			hasParent = true
+		}
+	})
+	return hasParent
 }
 
 // AddCmd adds a command to the cli.

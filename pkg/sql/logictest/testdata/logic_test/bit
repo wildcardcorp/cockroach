@@ -1,5 +1,3 @@
-# LogicTest: local local-opt local-parallel-stmts fakedist fakedist-opt fakedist-metadata
-
 query TTT
 SELECT B'1000101'::BIT(4)::STRING,
        B'1000101'::BIT(4),
@@ -9,17 +7,22 @@ SELECT B'1000101'::BIT(4)::STRING,
 
 
 statement ok
-CREATE TABLE bits(a BIT, b BIT(4), c VARBIT, d VARBIT(4))
+CREATE TABLE bits (
+  a BIT, b BIT(4), c VARBIT, d VARBIT(4),
+  FAMILY "primary" (a, b, c, d, rowid)
+)
 
 query TT colnames
 SHOW CREATE TABLE bits
 ----
 table_name  create_statement
-bits        CREATE TABLE bits (
+bits        CREATE TABLE public.bits (
             a BIT NULL,
             b BIT(4) NULL,
             c VARBIT NULL,
             d VARBIT(4) NULL,
+            rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
+            CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
             FAMILY "primary" (a, b, c, d, rowid)
 )
 
@@ -264,8 +267,10 @@ CREATE TABLE obitsa(x VARBIT(20)[]);
 query T
 SELECT create_statement FROM [SHOW CREATE obitsa]
 ----
-CREATE TABLE obitsa (
+CREATE TABLE public.obitsa (
    x VARBIT(20)[] NULL,
+   rowid INT8 NOT VISIBLE NOT NULL DEFAULT unique_rowid(),
+   CONSTRAINT "primary" PRIMARY KEY (rowid ASC),
    FAMILY "primary" (x, rowid)
 )
 

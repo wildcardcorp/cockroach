@@ -1,16 +1,12 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package cli
 
@@ -29,8 +25,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding/csv"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"github.com/cockroachdb/errors"
 	"github.com/olekukonko/tablewriter"
-	"github.com/pkg/errors"
 )
 
 // rowStrIter is an iterator interface for the printQueryOutput function. It is
@@ -98,11 +94,12 @@ func newRowSliceIter(allRows [][]string, align string) *rowSliceIter {
 
 type rowIter struct {
 	rows          *sqlRows
+	colTypes      []string
 	showMoreChars bool
 }
 
 func (iter *rowIter) Next() (row []string, err error) {
-	nextRowString, err := getNextRowStrings(iter.rows, iter.showMoreChars)
+	nextRowString, err := getNextRowStrings(iter.rows, iter.colTypes, iter.showMoreChars)
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +110,7 @@ func (iter *rowIter) Next() (row []string, err error) {
 }
 
 func (iter *rowIter) ToSlice() ([][]string, error) {
-	return getAllRowStrings(iter.rows, iter.showMoreChars)
+	return getAllRowStrings(iter.rows, iter.colTypes, iter.showMoreChars)
 }
 
 func (iter *rowIter) Align() []int {
@@ -141,6 +138,7 @@ func (iter *rowIter) Align() []int {
 func newRowIter(rows *sqlRows, showMoreChars bool) *rowIter {
 	return &rowIter{
 		rows:          rows,
+		colTypes:      rows.getColTypes(),
 		showMoreChars: showMoreChars,
 	}
 }
@@ -164,10 +162,13 @@ type rowReporter interface {
 
 // render iterates using the rowReporter object.
 // The caller can pass a noRowsHook helper that will be called in the
-// case there were no result rows. The helper is guaranteed to be called
+// case there were no result rows and no error.
+// This helper is guaranteed to be called
 // after the iteration through iter.Next(). Used in runQueryAndFormatResults.
+//
 // The completedHook is called after the last row is received/passed to the
-// rendered, but before the final rendering takes place.
+// rendered, but before the final rendering takes place. It is called
+// regardless of whether an error occurred.
 func render(
 	r rowReporter,
 	w io.Writer,
@@ -175,11 +176,39 @@ func render(
 	iter rowStrIter,
 	completedHook func(),
 	noRowsHook func() (bool, error),
-) error {
-	if err := r.describe(w, cols); err != nil {
-		return err
-	}
+) (err error) {
+	described := false
 	nRows := 0
+	defer func() {
+		// If the column headers are not printed yet, do it now.
+		if !described {
+			err = errors.WithSecondaryError(err, r.describe(w, cols))
+		}
+
+		// completedHook, if provided, is called unconditonally of error.
+		if completedHook != nil {
+			completedHook()
+		}
+
+		// We need to call doneNoRows/doneRows also unconditionally.
+		var handled bool
+		if nRows == 0 && noRowsHook != nil {
+			handled, err = noRowsHook()
+			if err != nil {
+				return
+			}
+		}
+		if handled {
+			err = errors.WithSecondaryError(err, r.doneNoRows(w))
+		} else {
+			err = errors.WithSecondaryError(err, r.doneRows(w, nRows))
+		}
+
+		if err != nil && nRows > 0 {
+			fmt.Fprintf(stderr, "(error encountered after some results were delivered)\n")
+		}
+	}()
+
 	for {
 		// Get a next row.
 		row, err := iter.Next()
@@ -193,33 +222,24 @@ func render(
 		}
 		if nRows == 0 {
 			// First row? Report.
-			if err := r.beforeFirstRow(w, iter); err != nil {
+			described = true
+			if err = r.describe(w, cols); err != nil {
+				return err
+			}
+			if err = r.beforeFirstRow(w, iter); err != nil {
 				return err
 			}
 		}
 
 		// Report every row including the first.
-		if err := r.iter(w, nRows, row); err != nil {
+		if err = r.iter(w, nRows, row); err != nil {
 			return err
 		}
 
 		nRows++
 	}
 
-	if completedHook != nil {
-		completedHook()
-	}
-
-	if nRows == 0 && noRowsHook != nil {
-		handled, err := noRowsHook()
-		if err != nil {
-			return err
-		}
-		if handled {
-			return r.doneNoRows(w)
-		}
-	}
-	return r.doneRows(w, nRows)
+	return nil
 }
 
 type asciiTableReporter struct {
@@ -255,6 +275,7 @@ func (p *asciiTableReporter) describe(w io.Writer, cols []string) error {
 		p.table.SetBorder(false)
 		p.table.SetReflowDuringAutoWrap(false)
 		p.table.SetHeader(expandedCols)
+		p.table.SetTrimWhiteSpaceAtEOL(true)
 		// This width is sufficient to show a "standard text line width"
 		// on the screen when viewed as a single column on a 80-wide terminal.
 		//
@@ -267,6 +288,10 @@ func (p *asciiTableReporter) describe(w io.Writer, cols []string) error {
 }
 
 func (p *asciiTableReporter) beforeFirstRow(w io.Writer, iter rowStrIter) error {
+	if p.table == nil {
+		return nil
+	}
+
 	p.table.SetColumnAlignment(iter.Align())
 	return nil
 }
@@ -301,6 +326,7 @@ func (p *asciiTableReporter) iter(_ io.Writer, _ int, row []string) error {
 func (p *asciiTableReporter) doneRows(w io.Writer, seenRows int) error {
 	if p.table != nil {
 		p.table.Render()
+		p.table = nil
 	} else {
 		// A simple delimiter, like in psql.
 		fmt.Fprintln(w, "--")
@@ -310,7 +336,10 @@ func (p *asciiTableReporter) doneRows(w io.Writer, seenRows int) error {
 	return nil
 }
 
-func (p *asciiTableReporter) doneNoRows(_ io.Writer) error { return nil }
+func (p *asciiTableReporter) doneNoRows(_ io.Writer) error {
+	p.table = nil
+	return nil
+}
 
 type csvReporter struct {
 	mu struct {

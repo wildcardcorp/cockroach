@@ -1,36 +1,37 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package sql_test
 
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/keys"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkv"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
 func TestTableRefs(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
 
 	params, _ := tests.CreateTestServerParams()
 	s, db, kvDB := serverutils.StartServer(t, params)
-	defer s.Stopper().Stop(context.TODO())
+	defer s.Stopper().Stop(context.Background())
 
 	// Populate the test database.
 	stmt := `
@@ -45,30 +46,30 @@ CREATE INDEX bc ON test.t(b, c);
 	}
 
 	// Retrieve the numeric descriptors.
-	tableDesc := sqlbase.GetTableDescriptor(kvDB, "test", "t")
-	tID := tableDesc.ID
-	var aID, bID, cID sqlbase.ColumnID
-	for _, c := range tableDesc.Columns {
-		switch c.Name {
+	tableDesc := catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "test", "t")
+	tID := tableDesc.GetID()
+	var aID, bID, cID descpb.ColumnID
+	for _, c := range tableDesc.PublicColumns() {
+		switch c.GetName() {
 		case "a":
-			aID = c.ID
+			aID = c.GetID()
 		case "b":
-			bID = c.ID
+			bID = c.GetID()
 		case "c":
-			cID = c.ID
+			cID = c.GetID()
 		}
 	}
-	pkID := tableDesc.PrimaryIndex.ID
-	secID := tableDesc.Indexes[0].ID
+	pkID := tableDesc.GetPrimaryIndexID()
+	secID := tableDesc.PublicNonPrimaryIndexes()[0].GetID()
 
 	// Retrieve the numeric descriptors.
-	tableDesc = sqlbase.GetTableDescriptor(kvDB, "test", "hidden")
-	tIDHidden := tableDesc.ID
-	var rowIDHidden sqlbase.ColumnID
-	for _, c := range tableDesc.Columns {
-		switch c.Name {
+	tableDesc = catalogkv.TestingGetTableDescriptor(kvDB, keys.SystemSQLCodec, "test", "hidden")
+	tIDHidden := tableDesc.GetID()
+	var rowIDHidden descpb.ColumnID
+	for _, c := range tableDesc.PublicColumns() {
+		switch c.GetName() {
 		case "rowid":
-			rowIDHidden = c.ID
+			rowIDHidden = c.GetID()
 		}
 	}
 
@@ -117,7 +118,7 @@ ALTER TABLE test.t DROP COLUMN xx;
 
 	for i, d := range testData {
 		t.Run(d.tableExpr, func(t *testing.T) {
-			sql := `SELECT columns FROM [EXPLAIN(VERBOSE) SELECT * FROM ` + d.tableExpr + "]"
+			sql := `SELECT info FROM [EXPLAIN(VERBOSE) SELECT * FROM ` + d.tableExpr + `] WHERE info LIKE '%columns:%'`
 			var columns string
 			if err := db.QueryRow(sql).Scan(&columns); err != nil {
 				if d.expectedError != "" {
@@ -128,7 +129,8 @@ ALTER TABLE test.t DROP COLUMN xx;
 					t.Fatalf("%d: %s: query failed: %v", i, d.tableExpr, err)
 				}
 			}
-
+			r := regexp.MustCompile("^.*columns: ")
+			columns = r.ReplaceAllString(columns, "")
 			if columns != d.expectedColumns {
 				t.Fatalf("%d: %s: expected: %s, got: %s", i, d.tableExpr, d.expectedColumns, columns)
 			}

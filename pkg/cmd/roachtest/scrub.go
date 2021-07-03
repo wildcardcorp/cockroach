@@ -1,17 +1,12 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License. See the AUTHORS file
-// for names of contributors.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package main
 
@@ -24,39 +19,52 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
-func registerScrubIndexOnlyTPCC(r *registry) {
-	r.Add(makeScrubTPCCTest(5, 1000, time.Hour*2, "index-only", 3))
+func registerScrubIndexOnlyTPCC(r *testRegistry) {
+	// numScrubRuns is set assuming a single SCRUB run (index only) takes ~1 min
+	r.Add(makeScrubTPCCTest(5, 100, 30*time.Minute, "index-only", 20))
 }
 
-func registerScrubAllChecksTPCC(r *registry) {
-	r.Add(makeScrubTPCCTest(5, 1000, time.Hour*2, "all-checks", 2))
+func registerScrubAllChecksTPCC(r *testRegistry) {
+	// numScrubRuns is set assuming a single SCRUB run (all checks) takes ~2 min
+	r.Add(makeScrubTPCCTest(5, 100, 30*time.Minute, "all-checks", 10))
 }
 
 func makeScrubTPCCTest(
 	numNodes, warehouses int, length time.Duration, optionName string, numScrubRuns int,
 ) testSpec {
 	var stmtOptions string
-	// SCRUB checks are run at -5s to avoid contention with TPCC traffic.
+	// SCRUB checks are run at -1m to avoid contention with TPCC traffic.
 	// By the time the SCRUB queries start, the tables will have been loaded for
 	// some time (since it takes some time to run the TPCC consistency checks),
 	// so using a timestamp in the past is fine.
 	switch optionName {
 	case "index-only":
-		stmtOptions = `AS OF SYSTEM TIME '-5s' WITH OPTIONS INDEX ALL`
+		stmtOptions = `AS OF SYSTEM TIME '-1m' WITH OPTIONS INDEX ALL`
 	case "all-checks":
-		stmtOptions = `AS OF SYSTEM TIME '-5s'`
+		stmtOptions = `AS OF SYSTEM TIME '-1m'`
 	default:
 		panic(fmt.Sprintf("Not a valid option: %s", optionName))
 	}
 
 	return testSpec{
-		Name:  fmt.Sprintf("scrub/%s/tpcc-%d", optionName, warehouses),
-		Nodes: nodes(numNodes),
+		Name:    fmt.Sprintf("scrub/%s/tpcc/w=%d", optionName, warehouses),
+		Owner:   OwnerSQLQueries,
+		Cluster: makeClusterSpec(numNodes),
 		Run: func(ctx context.Context, t *test, c *cluster) {
 			runTPCC(ctx, t, c, tpccOptions{
-				Warehouses: warehouses,
-				Extra:      "--wait=false --tolerate-errors",
+				Warehouses:   warehouses,
+				ExtraRunArgs: "--wait=false --tolerate-errors",
 				During: func(ctx context.Context) error {
+					if !c.isLocal() {
+						// Wait until tpcc has been running for a few minutes to start SCRUB checks
+						sleepInterval := time.Minute * 10
+						maxSleep := length / 2
+						if sleepInterval > maxSleep {
+							sleepInterval = maxSleep
+						}
+						time.Sleep(sleepInterval)
+					}
+
 					conn := c.Conn(ctx, 1)
 					defer conn.Close()
 
@@ -73,8 +81,10 @@ func makeScrubTPCCTest(
 					}
 					return nil
 				},
-				Duration: length,
+				Duration:  length,
+				SetupType: usingImport,
 			})
 		},
+		MinVersion: "v19.1.0",
 	}
 }

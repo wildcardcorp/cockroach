@@ -1,23 +1,18 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
-import { Location } from "history";
+import { Location, createPath } from "history";
 import { Action } from "redux";
 import { ThunkAction } from "redux-thunk";
 import { createSelector } from "reselect";
 
-import { createPath } from "src/hacks/createPath";
 import { userLogin, userLogout } from "src/util/api";
 import { AdminUIState } from "src/redux/state";
 import { LOGIN_PAGE, LOGOUT_PAGE } from "src/routes/login";
@@ -31,9 +26,17 @@ const dataFromServer = getDataFromServer();
 // State for application use.
 
 export interface LoginState {
-  useLogin(): boolean;
-  loginEnabled(): boolean;
-  hasAccess(): boolean;
+  // displayUserMenu() indicates whether the login drop-down menu should be
+  // displayed at the top right.
+  displayUserMenu(): boolean;
+  // secureCluster() indicates whether the connection is secure. If
+  // false, an "insecure" indicator is displayed at the top right.
+  secureCluster(): boolean;
+  // hideLoginPage() indicates whether the login page can be
+  // displayed at all. The login page is hidden e.g.
+  // after a user has logged in.
+  hideLoginPage(): boolean;
+  // loggedInUser() returns the name of the user logged in.
   loggedInUser(): string;
 }
 
@@ -44,15 +47,15 @@ class LoginEnabledState {
     this.apiState = state;
   }
 
-  useLogin(): boolean {
+  displayUserMenu(): boolean {
     return true;
   }
 
-  loginEnabled(): boolean {
+  secureCluster(): boolean {
     return true;
   }
 
-  hasAccess(): boolean {
+  hideLoginPage(): boolean {
     return this.apiState.loggedInUser != null;
   }
 
@@ -62,15 +65,15 @@ class LoginEnabledState {
 }
 
 class LoginDisabledState {
-  useLogin(): boolean {
+  displayUserMenu(): boolean {
     return true;
   }
 
-  loginEnabled(): boolean {
+  secureCluster(): boolean {
     return false;
   }
 
-  hasAccess(): boolean {
+  hideLoginPage(): boolean {
     return true;
   }
 
@@ -80,15 +83,15 @@ class LoginDisabledState {
 }
 
 class NoLoginState {
-  useLogin(): boolean {
+  displayUserMenu(): boolean {
     return false;
   }
 
-  loginEnabled(): boolean {
+  secureCluster(): boolean {
     return false;
   }
 
-  hasAccess(): boolean {
+  hideLoginPage(): boolean {
     return true;
   }
 
@@ -127,12 +130,14 @@ function shouldRedirect(location: Location) {
 }
 
 export function getLoginPage(location: Location) {
-  const query = !shouldRedirect(location) ? undefined : {
-    redirectTo: createPath({
-      pathname: location.pathname,
-      search: location.search,
-    }),
-  };
+  const query = !shouldRedirect(location)
+    ? undefined
+    : {
+        redirectTo: createPath({
+          pathname: location.pathname,
+          search: location.search,
+        }),
+      };
   return {
     pathname: LOGIN_PAGE,
     query: query,
@@ -147,12 +152,18 @@ export interface LoginAPIState {
   loggedInUser: string;
   error: Error;
   inProgress: boolean;
+  oidcAutoLogin: boolean;
+  oidcLoginEnabled: boolean;
+  oidcButtonText: string;
 }
 
-const emptyLoginState: LoginAPIState = {
+export const emptyLoginState: LoginAPIState = {
   loggedInUser: dataFromServer.LoggedInUser,
   error: null,
   inProgress: false,
+  oidcAutoLogin: dataFromServer.OIDCAutoLogin,
+  oidcLoginEnabled: dataFromServer.OIDCLoginEnabled,
+  oidcButtonText: dataFromServer.OIDCButtonText,
 };
 
 // Actions
@@ -195,7 +206,10 @@ const logoutBeginAction = {
   type: LOGOUT_BEGIN,
 };
 
-export function doLogin(username: string, password: string): ThunkAction<Promise<void>, AdminUIState, void> {
+export function doLogin(
+  username: string,
+  password: string,
+): ThunkAction<Promise<void>, AdminUIState, void> {
   return (dispatch) => {
     dispatch(loginBeginAction);
 
@@ -203,11 +217,14 @@ export function doLogin(username: string, password: string): ThunkAction<Promise
       username,
       password,
     });
-    return userLogin(loginReq)
-      .then(
-        () => { dispatch(loginSuccess(username)); },
-        (err) => { dispatch(loginFailure(err)); },
-      );
+    return userLogin(loginReq).then(
+      () => {
+        dispatch(loginSuccess(username));
+      },
+      (err) => {
+        dispatch(loginFailure(err));
+      },
+    );
   };
 }
 
@@ -219,42 +236,48 @@ export function doLogout(): ThunkAction<Promise<void>, AdminUIState, void> {
     // If there was a successful log out but the network dropped the response somehow,
     // you'll get the login page on reload. If The logout actually didn't work, you'll
     // be reloaded to the same page and can try to log out again.
-    return userLogout()
-      .then(
-        () => {
-          document.location.reload();
-        },
-        () => {
-          document.location.reload();
-        },
-      );
+    return userLogout().then(
+      () => {
+        document.location.reload();
+      },
+      () => {
+        document.location.reload();
+      },
+    );
   };
 }
 
 // Reducer
 
-export function loginReducer(state = emptyLoginState, action: Action): LoginAPIState {
+export function loginReducer(
+  state = emptyLoginState,
+  action: Action,
+): LoginAPIState {
   switch (action.type) {
     case LOGIN_BEGIN:
       return {
+        ...state,
         loggedInUser: null,
         error: null,
         inProgress: true,
       };
     case LOGIN_SUCCESS:
       return {
+        ...state,
         loggedInUser: (action as LoginSuccessAction).loggedInUser,
         inProgress: false,
         error: null,
       };
     case LOGIN_FAILURE:
       return {
+        ...state,
         loggedInUser: null,
         inProgress: false,
         error: (action as LoginFailureAction).error,
       };
     case LOGOUT_BEGIN:
       return {
+        ...state,
         loggedInUser: state.loggedInUser,
         inProgress: true,
         error: null,

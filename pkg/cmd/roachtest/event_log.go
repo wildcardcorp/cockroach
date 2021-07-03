@@ -1,17 +1,12 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License. See the AUTHORS file
-// for names of contributors.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package main
 
@@ -24,13 +19,11 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
-	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 )
 
 func runEventLog(ctx context.Context, t *test, c *cluster) {
 	type nodeEventInfo struct {
-		Descriptor roachpb.NodeDescriptor
-		ClusterID  uuid.UUID
+		NodeID roachpb.NodeID
 	}
 
 	c.Put(ctx, cockroach, "./cockroach")
@@ -41,7 +34,6 @@ func runEventLog(ctx context.Context, t *test, c *cluster) {
 	db := c.Conn(ctx, 1)
 	defer db.Close()
 	waitForFullReplication(t, db)
-	var clusterID uuid.UUID
 
 	err := retry.ForDuration(10*time.Second, func() error {
 		rows, err := db.Query(
@@ -50,7 +42,6 @@ func runEventLog(ctx context.Context, t *test, c *cluster) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		clusterID = uuid.UUID{}
 		seenIds := make(map[int64]struct{})
 		for rows.Next() {
 			var targetID int64
@@ -67,20 +58,8 @@ func runEventLog(ctx context.Context, t *test, c *cluster) {
 			if err := json.Unmarshal([]byte(infoStr.String), &info); err != nil {
 				t.Fatal(err)
 			}
-			if a, e := int64(info.Descriptor.NodeID), targetID; a != e {
+			if a, e := int64(info.NodeID), targetID; a != e {
 				t.Fatalf("Node join with targetID %d had descriptor for wrong node %d", e, a)
-			}
-
-			// Verify cluster ID is recorded, and is the same for all nodes.
-			if (info.ClusterID == uuid.UUID{}) {
-				t.Fatalf("Node join recorded nil cluster id, info: %v", info)
-			}
-			if (clusterID == uuid.UUID{}) {
-				clusterID = info.ClusterID
-			} else if clusterID != info.ClusterID {
-				t.Fatalf(
-					"Node join recorded different cluster ID than earlier node. Expected %s, got %s. Info: %v",
-					clusterID, info.ClusterID, info)
 			}
 
 			// Verify that all NodeIDs are different.
@@ -92,9 +71,9 @@ func runEventLog(ctx context.Context, t *test, c *cluster) {
 		if err := rows.Err(); err != nil {
 			t.Fatal(err)
 		}
-		if c.nodes != len(seenIds) {
+		if c.spec.NodeCount != len(seenIds) {
 			return fmt.Errorf("expected %d node join messages, found %d: %v",
-				c.nodes, len(seenIds), seenIds)
+				c.spec.NodeCount, len(seenIds), seenIds)
 		}
 		return nil
 	})
@@ -131,13 +110,8 @@ func runEventLog(ctx context.Context, t *test, c *cluster) {
 			if err := json.Unmarshal([]byte(infoStr.String), &info); err != nil {
 				t.Fatal(err)
 			}
-			if a, e := int64(info.Descriptor.NodeID), targetID; a != e {
+			if a, e := int64(info.NodeID), targetID; a != e {
 				t.Fatalf("node join with targetID %d had descriptor for wrong node %d", e, a)
-			}
-
-			// Verify cluster ID is recorded, and is the same for all nodes.
-			if clusterID != info.ClusterID {
-				t.Fatalf("expected cluser ID %s, got %s\n%v", clusterID, info.ClusterID, info)
 			}
 
 			seenCount++

@@ -1,16 +1,12 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package sql
 
@@ -18,13 +14,17 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
+	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
+	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 )
 
 type commentOnTableNode struct {
 	n         *tree.CommentOnTable
-	tableDesc *MutableTableDescriptor
+	tableDesc catalog.TableDescriptor
 }
 
 // CommentOnTable add comment on a table.
@@ -32,7 +32,15 @@ type commentOnTableNode struct {
 //   notes: postgres requires CREATE on the table.
 //          mysql requires ALTER, CREATE, INSERT on the table.
 func (p *planner) CommentOnTable(ctx context.Context, n *tree.CommentOnTable) (planNode, error) {
-	tableDesc, err := p.ResolveMutableTableDescriptor(ctx, &n.Table, true, requireTableDesc)
+	if err := checkSchemaChangeEnabled(
+		ctx,
+		p.ExecCfg(),
+		"COMMENT ON TABLE",
+	); err != nil {
+		return nil, err
+	}
+
+	tableDesc, err := p.ResolveUncachedTableDescriptorEx(ctx, n.Table, true, tree.ResolveRequireTableDesc)
 	if err != nil {
 		return nil, err
 	}
@@ -46,47 +54,43 @@ func (p *planner) CommentOnTable(ctx context.Context, n *tree.CommentOnTable) (p
 
 func (n *commentOnTableNode) startExec(params runParams) error {
 	if n.n.Comment != nil {
-		_, err := params.p.extendedEvalCtx.ExecCfg.InternalExecutor.Exec(
+		_, err := params.p.extendedEvalCtx.ExecCfg.InternalExecutor.ExecEx(
 			params.ctx,
 			"set-table-comment",
 			params.p.Txn(),
+			sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 			"UPSERT INTO system.comments VALUES ($1, $2, 0, $3)",
 			keys.TableCommentType,
-			n.tableDesc.ID,
+			n.tableDesc.GetID(),
 			*n.n.Comment)
 		if err != nil {
 			return err
 		}
 	} else {
-		_, err := params.p.extendedEvalCtx.ExecCfg.InternalExecutor.Exec(
+		_, err := params.p.extendedEvalCtx.ExecCfg.InternalExecutor.ExecEx(
 			params.ctx,
 			"delete-table-comment",
 			params.p.Txn(),
+			sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 			"DELETE FROM system.comments WHERE type=$1 AND object_id=$2 AND sub_id=0",
 			keys.TableCommentType,
-			n.tableDesc.ID)
+			n.tableDesc.GetID())
 		if err != nil {
 			return err
 		}
 	}
 
-	return MakeEventLogger(params.extendedEvalCtx.ExecCfg).InsertEventRecord(
-		params.ctx,
-		params.p.txn,
-		EventLogCommentOnTable,
-		int32(n.tableDesc.ID),
-		int32(params.extendedEvalCtx.NodeID),
-		struct {
-			TableName string
-			Statement string
-			User      string
-			Comment   *string
-		}{
-			n.n.Table.FQString(),
-			n.n.String(),
-			params.SessionData().User,
-			n.n.Comment},
-	)
+	comment := ""
+	if n.n.Comment != nil {
+		comment = *n.n.Comment
+	}
+	return params.p.logEvent(params.ctx,
+		n.tableDesc.GetID(),
+		&eventpb.CommentOnTable{
+			TableName:   params.p.ResolvedName(n.n.Table).FQString(),
+			Comment:     comment,
+			NullComment: n.n.Comment == nil,
+		})
 }
 
 func (n *commentOnTableNode) Next(runParams) (bool, error) { return false, nil }

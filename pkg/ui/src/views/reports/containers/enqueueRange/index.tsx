@@ -1,22 +1,17 @@
-// Copyright 2018 The Cockroach Authors.
+// Copyright 2020 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
-import _ from "lodash";
-import React from "react";
+import React, { Fragment } from "react";
 import Helmet from "react-helmet";
-import { withRouter, WithRouterProps } from "react-router";
-import { connect } from "react-redux";
+import { RouteComponentProps, withRouter } from "react-router-dom";
+import moment from "moment";
 
 import { enqueueRange } from "src/util/api";
 import { cockroach } from "src/js/protos";
@@ -39,7 +34,12 @@ const QUEUES = [
 ];
 
 interface EnqueueRangeProps {
-  handleEnqueueRange: (queue: string, rangeID: number, nodeID: number, skipShouldQueue: boolean) => Promise<EnqueueRangeResponse>;
+  handleEnqueueRange: (
+    queue: string,
+    rangeID: number,
+    nodeID: number,
+    skipShouldQueue: boolean,
+  ) => Promise<EnqueueRangeResponse>;
 }
 
 interface EnqueueRangeState {
@@ -51,7 +51,10 @@ interface EnqueueRangeState {
   error: Error;
 }
 
-class EnqueueRange extends React.Component<EnqueueRangeProps & WithRouterProps, EnqueueRangeState> {
+export class EnqueueRange extends React.Component<
+  EnqueueRangeProps & RouteComponentProps,
+  EnqueueRangeState
+> {
   state: EnqueueRangeState = {
     queue: QUEUES[0],
     rangeID: "",
@@ -65,66 +68,92 @@ class EnqueueRange extends React.Component<EnqueueRangeProps & WithRouterProps, 
     this.setState({
       queue: evt.currentTarget.value,
     });
-  }
+  };
 
   handleUpdateRangeID = (evt: React.FormEvent<{ value: string }>) => {
     this.setState({
       rangeID: evt.currentTarget.value,
     });
-  }
+  };
 
   handleUpdateNodeID = (evt: React.FormEvent<{ value: string }>) => {
     this.setState({
       nodeID: evt.currentTarget.value,
     });
-  }
+  };
+
+  handleEnqueueRange = (
+    queue: string,
+    rangeID: number,
+    nodeID: number,
+    skipShouldQueue: boolean,
+  ) => {
+    const req = new EnqueueRangeRequest({
+      queue: queue,
+      range_id: rangeID,
+      node_id: nodeID,
+      skip_should_queue: skipShouldQueue,
+    });
+    return enqueueRange(req, moment.duration({ hours: 1 }));
+  };
 
   handleSubmit = (evt: React.FormEvent<any>) => {
     evt.preventDefault();
 
-    this.props.handleEnqueueRange(
+    this.handleEnqueueRange(
       this.state.queue,
       // These parseInts should succeed because <input type="number" />
       // enforces numeric input. Otherwise they're NaN.
-      _.parseInt(this.state.rangeID),
-      _.parseInt(this.state.nodeID),
+      parseInt(this.state.rangeID, 10),
+      parseInt(this.state.nodeID, 10),
       this.state.skipShouldQueue,
     ).then(
       (response) => {
-        this.setState({ response: response, error: null });
+        this.setState({ response, error: null });
       },
-      (err) => {
-        this.setState({ response: null, error: err });
+      (error) => {
+        this.setState({ response: null, error });
       },
     );
-  }
+  };
 
   renderNodeResponse(details: EnqueueRangeResponse.IDetails) {
-    if (details.error) {
-      return <React.Fragment><b>Error:</b> {details.error}</React.Fragment>;
-    }
-
     return (
-      <table className="enqueue-range-table">
-        <thead>
-          <tr className="enqueue-range-table__row enqueue-range-table__row--header">
-            <th className="enqueue-range-table__cell enqueue-range-table__cell--header">Timestamp</th>
-            <th className="enqueue-range-table__cell enqueue-range-table__cell--header">Message</th>
-          </tr>
-        </thead>
-        <tbody>
-          {details.events.map((event) => (
-            <tr className="enqueue-range-table__row--body">
-              <td className="enqueue-range-table__cell enqueue-range-table__cell--date">
-                {Print.Timestamp(event.time)}
-              </td>
-              <td className="enqueue-range-table__cell">
-                <pre>{event.message}</pre>
-              </td>
+      <Fragment>
+        <p>
+          {details.error ? (
+            <Fragment>
+              <b>Error:</b> {details.error}
+            </Fragment>
+          ) : (
+            "Call succeeded"
+          )}
+        </p>
+        <table className="enqueue-range-table">
+          <thead>
+            <tr className="enqueue-range-table__row enqueue-range-table__row--header">
+              <th className="enqueue-range-table__cell enqueue-range-table__cell--header">
+                Timestamp
+              </th>
+              <th className="enqueue-range-table__cell enqueue-range-table__cell--header">
+                Message
+              </th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {details.events.map((event) => (
+              <tr className="enqueue-range-table__row--body">
+                <td className="enqueue-range-table__cell enqueue-range-table__cell--date">
+                  {Print.Timestamp(event.time)}
+                </td>
+                <td className="enqueue-range-table__cell">
+                  <pre>{event.message}</pre>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Fragment>
     );
   }
 
@@ -136,8 +165,8 @@ class EnqueueRange extends React.Component<EnqueueRangeProps & WithRouterProps, 
     }
 
     return (
-      <React.Fragment>
-        <h2>Enqueue Range Output</h2>
+      <Fragment>
+        <h2 className="base-heading">Enqueue Range Output</h2>
         {response.details.map((details) => (
           <div>
             <h3>Node n{details.node_id}</h3>
@@ -145,7 +174,7 @@ class EnqueueRange extends React.Component<EnqueueRangeProps & WithRouterProps, 
             {this.renderNodeResponse(details)}
           </div>
         ))}
-      </React.Fragment>
+      </Fragment>
     );
   }
 
@@ -156,28 +185,32 @@ class EnqueueRange extends React.Component<EnqueueRangeProps & WithRouterProps, 
       return null;
     }
 
-    return (
-      <React.Fragment>Error running EnqueueRange: { error.message }</React.Fragment>
-    );
+    return <Fragment>Error running EnqueueRange: {error.message}</Fragment>;
   }
 
   render() {
     return (
-      <React.Fragment>
-        <Helmet>
-          <title>Enqueue Range</title>
-        </Helmet>
+      <Fragment>
+        <Helmet title="Enqueue Range" />
         <div className="content">
           <section className="section">
             <div className="form-container">
-              <h1 className="heading">Manually enqueue range in a replica queue</h1>
+              <h1 className="base-heading heading">
+                Manually enqueue range in a replica queue
+              </h1>
               <br />
-              <form onSubmit={this.handleSubmit} className="form-internal" method="post">
+              <form
+                onSubmit={this.handleSubmit}
+                className="form-internal"
+                method="post"
+              >
                 <label>
                   Queue:{" "}
                   <select onChange={this.handleUpdateQueue}>
                     {QUEUES.map((queue) => (
-                      <option key={queue} value={queue}>{queue}</option>
+                      <option key={queue} value={queue}>
+                        {queue}
+                      </option>
                     ))}
                   </select>
                 </label>
@@ -204,6 +237,8 @@ class EnqueueRange extends React.Component<EnqueueRangeProps & WithRouterProps, 
                     value={this.state.nodeID}
                     placeholder="NodeID (optional)"
                   />
+                  &nbsp;If not specified, we'll attempt to enqueue on all the
+                  nodes.
                 </label>
                 <br />
                 <label>
@@ -212,15 +247,15 @@ class EnqueueRange extends React.Component<EnqueueRangeProps & WithRouterProps, 
                     type="checkbox"
                     checked={this.state.skipShouldQueue}
                     name="skipShouldQueue"
-                    onChange={() => this.setState({ skipShouldQueue: !this.state.skipShouldQueue })}
+                    onChange={() =>
+                      this.setState({
+                        skipShouldQueue: !this.state.skipShouldQueue,
+                      })
+                    }
                   />
                 </label>
                 <br />
-                <input
-                  type="submit"
-                  className="submit-button"
-                  value="Submit"
-                />
+                <input type="submit" className="submit-button" value="Submit" />
               </form>
             </div>
           </section>
@@ -229,27 +264,11 @@ class EnqueueRange extends React.Component<EnqueueRangeProps & WithRouterProps, 
           {this.renderResponse()}
           {this.renderError()}
         </section>
-      </React.Fragment>
+      </Fragment>
     );
   }
 }
 
-// tslint:disable-next-line:variable-name
-const EnqueueRangeConnected = connect(
-  () => {
-    return {};
-  },
-  () => ({
-    handleEnqueueRange: (queue: string, rangeID: number, nodeID: number, skipShouldQueue: boolean) => {
-      const req = new EnqueueRangeRequest({
-        queue: queue,
-        range_id: rangeID,
-        node_id: nodeID,
-        skip_should_queue: skipShouldQueue,
-      });
-      return enqueueRange(req);
-    },
-  }),
-)(withRouter(EnqueueRange));
+const EnqueueRangeConnected = withRouter(EnqueueRange);
 
 export default EnqueueRangeConnected;

@@ -1,23 +1,34 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package tree
 
 import (
 	"bytes"
+	"fmt"
 	"unicode/utf8"
+
+	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/lib/pq/oid"
 )
+
+// ResolveBlankPaddedChar pads the given string with spaces if blank padding is
+// required or returns the string unmodified otherwise.
+func ResolveBlankPaddedChar(s string, t *types.T) string {
+	if t.Oid() == oid.T_bpchar {
+		// Pad spaces on the right of the string to make it of length specified in
+		// the type t.
+		return fmt.Sprintf("%-*v", t.Width(), s)
+	}
+	return s
+}
 
 func (d *DTuple) pgwireFormat(ctx *FmtCtx) {
 	// When converting a tuple to text in "postgres mode" there is
@@ -33,14 +44,17 @@ func (d *DTuple) pgwireFormat(ctx *FmtCtx) {
 	// string printer called pgwireFormatStringInTuple().
 	ctx.WriteByte('(')
 	comma := ""
-	for _, v := range d.D {
+	for i, v := range d.D {
 		ctx.WriteString(comma)
+		t := d.ResolvedType().TupleContents()[i]
 		switch dv := UnwrapDatum(nil, v).(type) {
 		case dNull:
 		case *DString:
-			pgwireFormatStringInTuple(ctx.Buffer, string(*dv))
+			s := ResolveBlankPaddedChar(string(*dv), t)
+			pgwireFormatStringInTuple(&ctx.Buffer, s)
 		case *DCollatedString:
-			pgwireFormatStringInTuple(ctx.Buffer, dv.Contents)
+			s := ResolveBlankPaddedChar(dv.Contents, t)
+			pgwireFormatStringInTuple(&ctx.Buffer, s)
 			// Bytes cannot use the default case because they will be incorrectly
 			// double escaped.
 		case *DBytes:
@@ -48,10 +62,10 @@ func (d *DTuple) pgwireFormat(ctx *FmtCtx) {
 		case *DJSON:
 			var buf bytes.Buffer
 			dv.JSON.Format(&buf)
-			pgwireFormatStringInTuple(ctx.Buffer, buf.String())
+			pgwireFormatStringInTuple(&ctx.Buffer, buf.String())
 		default:
 			s := AsStringWithFlags(v, ctx.flags)
-			pgwireFormatStringInTuple(ctx.Buffer, s)
+			pgwireFormatStringInTuple(&ctx.Buffer, s)
 		}
 		comma = ","
 	}
@@ -90,6 +104,23 @@ func (d *DArray) pgwireFormat(ctx *FmtCtx) {
 	// instead printed as-is. Only non-valid characters get escaped to
 	// hex. So we delegate this formatting to a tuple-specific
 	// string printer called pgwireFormatStringInArray().
+	switch d.ResolvedType().Oid() {
+	case oid.T_int2vector, oid.T_oidvector:
+		// vectors are serialized as a string of space-separated values.
+		sep := ""
+		// TODO(justin): add a test for nested arrays when #32552 is
+		// addressed.
+		for _, d := range d.Array {
+			ctx.WriteString(sep)
+			ctx.FormatNode(d)
+			sep = " "
+		}
+		return
+	}
+
+	if ctx.HasFlags(FmtPGCatalog) {
+		ctx.WriteByte('\'')
+	}
 	ctx.WriteByte('{')
 	comma := ""
 	for _, v := range d.Array {
@@ -98,20 +129,23 @@ func (d *DArray) pgwireFormat(ctx *FmtCtx) {
 		case dNull:
 			ctx.WriteString("NULL")
 		case *DString:
-			pgwireFormatStringInArray(ctx.Buffer, string(*dv))
+			pgwireFormatStringInArray(ctx, string(*dv))
 		case *DCollatedString:
-			pgwireFormatStringInArray(ctx.Buffer, dv.Contents)
+			pgwireFormatStringInArray(ctx, dv.Contents)
 			// Bytes cannot use the default case because they will be incorrectly
 			// double escaped.
 		case *DBytes:
 			ctx.FormatNode(dv)
 		default:
 			s := AsStringWithFlags(v, ctx.flags)
-			pgwireFormatStringInArray(ctx.Buffer, s)
+			pgwireFormatStringInArray(ctx, s)
 		}
 		comma = ","
 	}
 	ctx.WriteByte('}')
+	if ctx.HasFlags(FmtPGCatalog) {
+		ctx.WriteByte('\'')
+	}
 }
 
 var tupleQuoteSet, arrayQuoteSet asciiSet
@@ -146,7 +180,8 @@ func pgwireQuoteStringInArray(in string) bool {
 	return false
 }
 
-func pgwireFormatStringInArray(buf *bytes.Buffer, in string) {
+func pgwireFormatStringInArray(ctx *FmtCtx, in string) {
+	buf := &ctx.Buffer
 	quote := pgwireQuoteStringInArray(in)
 	if quote {
 		buf.WriteByte('"')
@@ -157,6 +192,9 @@ func pgwireFormatStringInArray(buf *bytes.Buffer, in string) {
 			// Strings in arrays escape " and \.
 			buf.WriteByte('\\')
 			buf.WriteByte(byte(r))
+		} else if ctx.HasFlags(FmtPGCatalog) && r == '\'' {
+			buf.WriteByte('\'')
+			buf.WriteByte('\'')
 		} else {
 			buf.WriteRune(r)
 		}

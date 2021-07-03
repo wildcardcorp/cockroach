@@ -1,43 +1,50 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 import _ from "lodash";
 import React from "react";
-import PropTypes from "prop-types";
 import { Helmet } from "react-helmet";
-import { InjectedRouter, RouterState } from "react-router";
+import { compose } from "redux";
 import { connect } from "react-redux";
 import { createSelector } from "reselect";
+import { withRouter, RouteComponentProps } from "react-router-dom";
 
-import {
-  nodeIDAttr, dashboardNameAttr,
-} from "src/util/constants";
-
+import { nodeIDAttr, dashboardNameAttr } from "src/util/constants";
 import Dropdown, { DropdownOption } from "src/views/shared/components/dropdown";
-import { PageConfig, PageConfigItem } from "src/views/shared/components/pageconfig";
+import {
+  PageConfig,
+  PageConfigItem,
+} from "src/views/shared/components/pageconfig";
 import TimeScaleDropdown from "src/views/cluster/containers/timescale";
 import ClusterSummaryBar from "./summaryBar";
 
 import { AdminUIState } from "src/redux/state";
 import { refreshNodes, refreshLiveness } from "src/redux/apiReducers";
-import { hoverStateSelector, HoverState, hoverOn, hoverOff } from "src/redux/hover";
-import { nodesSummarySelector, NodesSummary, LivenessStatus } from "src/redux/nodes";
+import {
+  hoverStateSelector,
+  HoverState,
+  hoverOn,
+  hoverOff,
+} from "src/redux/hover";
+import {
+  nodesSummarySelector,
+  NodesSummary,
+  LivenessStatus,
+  selectNodesSummaryValid,
+} from "src/redux/nodes";
 import Alerts from "src/views/shared/containers/alerts";
 import { MetricsDataProvider } from "src/views/shared/containers/metricDataProvider";
 
 import {
-  GraphDashboardProps, storeIDsForNode,
+  GraphDashboardProps,
+  storeIDsForNode,
 } from "./dashboards/dashboardUtils";
 
 import overviewDashboard from "./dashboards/overview";
@@ -49,22 +56,32 @@ import distributedDashboard from "./dashboards/distributed";
 import queuesDashboard from "./dashboards/queues";
 import requestsDashboard from "./dashboards/requests";
 import hardwareDashboard from "./dashboards/hardware";
+import changefeedsDashboard from "./dashboards/changefeeds";
+import { getMatchParamByName } from "src/util/query";
+import { PayloadAction } from "src/interfaces/action";
+import {
+  setTimeRange,
+  setTimeScale,
+  TimeWindow,
+  TimeScale,
+} from "src/redux/timewindow";
 
 interface GraphDashboard {
   label: string;
   component: (props: GraphDashboardProps) => React.ReactElement<any>[];
 }
 
-const dashboards: {[key: string]: GraphDashboard} = {
-  "overview" : { label: "Overview", component: overviewDashboard },
-  "hardware": { label: "Hardware", component: hardwareDashboard },
-  "runtime" : { label: "Runtime", component: runtimeDashboard },
-  "sql": { label: "SQL", component: sqlDashboard },
-  "storage": { label: "Storage", component: storageDashboard },
-  "replication": { label: "Replication", component: replicationDashboard },
-  "distributed": { label: "Distributed", component: distributedDashboard },
-  "queues": { label: "Queues", component: queuesDashboard },
-  "requests": { label: "Slow Requests", component: requestsDashboard },
+const dashboards: { [key: string]: GraphDashboard } = {
+  overview: { label: "Overview", component: overviewDashboard },
+  hardware: { label: "Hardware", component: hardwareDashboard },
+  runtime: { label: "Runtime", component: runtimeDashboard },
+  sql: { label: "SQL", component: sqlDashboard },
+  storage: { label: "Storage", component: storageDashboard },
+  replication: { label: "Replication", component: replicationDashboard },
+  distributed: { label: "Distributed", component: distributedDashboard },
+  queues: { label: "Queues", component: queuesDashboard },
+  requests: { label: "Slow Requests", component: requestsDashboard },
+  changefeeds: { label: "Changefeeds", component: changefeedsDashboard },
 };
 
 const defaultDashboard = "overview";
@@ -76,33 +93,29 @@ const dashboardDropdownOptions = _.map(dashboards, (dashboard, key) => {
   };
 });
 
-// The properties required by a NodeGraphs component.
-interface NodeGraphsOwnProps {
+type MapStateToProps = {
+  nodesSummary: NodesSummary;
+  hoverState: HoverState;
+  nodesSummaryValid: boolean;
+};
+
+type MapDispatchToProps = {
   refreshNodes: typeof refreshNodes;
   refreshLiveness: typeof refreshLiveness;
   hoverOn: typeof hoverOn;
   hoverOff: typeof hoverOff;
-  nodesQueryValid: boolean;
-  livenessQueryValid: boolean;
-  nodesSummary: NodesSummary;
-  hoverState: HoverState;
-}
+  setTimeRange: (tw: TimeWindow) => PayloadAction<TimeWindow>;
+  setTimeScale: (ts: TimeScale) => PayloadAction<TimeScale>;
+};
 
-type NodeGraphsProps = NodeGraphsOwnProps & RouterState;
+type NodeGraphsProps = RouteComponentProps &
+  MapStateToProps &
+  MapDispatchToProps;
 
 /**
  * NodeGraphs renders the main content of the cluster graphs page.
  */
-class NodeGraphs extends React.Component<NodeGraphsProps, {}> {
-  // Magic to add react router to the context.
-  // See https://github.com/ReactTraining/react-router/issues/975
-  // TODO(mrtracy): Switch this, and the other uses of contextTypes, to use the
-  // 'withRouter' HoC after upgrading to react-router 4.x.
-  static contextTypes = {
-    router: PropTypes.object.isRequired,
-  };
-  context: { router: InjectedRouter & RouterState; };
-
+export class NodeGraphs extends React.Component<NodeGraphsProps> {
   /**
    * Selector to compute node dropdown options from the current node summary
    * collection.
@@ -111,12 +124,20 @@ class NodeGraphs extends React.Component<NodeGraphsProps, {}> {
     (summary: NodesSummary) => summary.nodeStatuses,
     (summary: NodesSummary) => summary.nodeDisplayNameByID,
     (summary: NodesSummary) => summary.livenessStatusByNodeID,
-    (nodeStatuses, nodeDisplayNameByID, livenessStatusByNodeID): DropdownOption[] => {
-      const base = [{value: "", label: "Cluster"}];
+    (
+      nodeStatuses,
+      nodeDisplayNameByID,
+      livenessStatusByNodeID,
+    ): DropdownOption[] => {
+      const base = [{ value: "", label: "Cluster" }];
       return base.concat(
         _.chain(nodeStatuses)
-          .filter(ns => livenessStatusByNodeID[ns.desc.node_id] !== LivenessStatus.DECOMMISSIONED)
-          .map(ns => ({
+          .filter(
+            (ns) =>
+              livenessStatusByNodeID[ns.desc.node_id] !==
+              LivenessStatus.NODE_STATUS_DECOMMISSIONED,
+          )
+          .map((ns) => ({
             value: ns.desc.node_id.toString(),
             label: nodeDisplayNameByID[ns.desc.node_id],
           }))
@@ -125,49 +146,52 @@ class NodeGraphs extends React.Component<NodeGraphsProps, {}> {
     },
   );
 
-  refresh(props = this.props) {
-    if (!props.nodesQueryValid) {
-      props.refreshNodes();
-    }
-    if (!props.livenessQueryValid) {
-      props.refreshLiveness();
-    }
-  }
+  refresh = () => {
+    this.props.refreshNodes();
+    this.props.refreshLiveness();
+  };
 
   setClusterPath(nodeID: string, dashboardName: string) {
+    const push = this.props.history.push;
     if (!_.isString(nodeID) || nodeID === "") {
-      this.context.router.push(`/metrics/${dashboardName}/cluster`);
+      push(`/metrics/${dashboardName}/cluster`);
     } else {
-      this.context.router.push(`/metrics/${dashboardName}/node/${nodeID}`);
+      push(`/metrics/${dashboardName}/node/${nodeID}`);
     }
   }
 
   nodeChange = (selected: DropdownOption) => {
-    this.setClusterPath(selected.value, this.props.params[dashboardNameAttr]);
-  }
+    this.setClusterPath(
+      selected.value,
+      getMatchParamByName(this.props.match, dashboardNameAttr),
+    );
+  };
 
   dashChange = (selected: DropdownOption) => {
-    this.setClusterPath(this.props.params[nodeIDAttr], selected.value);
-  }
+    this.setClusterPath(
+      getMatchParamByName(this.props.match, nodeIDAttr),
+      selected.value,
+    );
+  };
 
-  componentWillMount() {
+  componentDidMount() {
     this.refresh();
   }
 
-  componentWillReceiveProps(props: NodeGraphsProps) {
-    this.refresh(props);
+  componentDidUpdate() {
+    this.refresh();
   }
 
   render() {
-    const { params, nodesSummary } = this.props;
-    const selectedDashboard = params[dashboardNameAttr];
+    const { match, nodesSummary } = this.props;
+    const selectedDashboard = getMatchParamByName(match, dashboardNameAttr);
     const dashboard = _.has(dashboards, selectedDashboard)
       ? selectedDashboard
       : defaultDashboard;
 
     const title = dashboards[dashboard].label + " Dashboard";
-    const selectedNode = params[nodeIDAttr] || "";
-    const nodeSources = (selectedNode !== "") ? [selectedNode] : null;
+    const selectedNode = getMatchParamByName(match, nodeIDAttr) || "";
+    const nodeSources = selectedNode !== "" ? [selectedNode] : null;
 
     // When "all" is the selected source, some graphs display a line for every
     // node in the cluster using the nodeIDs collection. However, if a specific
@@ -178,14 +202,17 @@ class NodeGraphs extends React.Component<NodeGraphsProps, {}> {
     // If a single node is selected, we need to restrict the set of stores
     // queried for per-store metrics (only stores that belong to that node will
     // be queried).
-    const storeSources = nodeSources ? storeIDsForNode(nodesSummary, nodeSources[0]) : null;
+    const storeSources = nodeSources
+      ? storeIDsForNode(nodesSummary, nodeSources[0])
+      : null;
 
     // tooltipSelection is a string used in tooltips to reference the currently
     // selected nodes. This is a prepositional phrase, currently either "across
     // all nodes" or "on node X".
-    const tooltipSelection = (nodeSources && nodeSources.length === 1)
-                              ? `on node ${nodeSources[0]}`
-                              : "across all nodes";
+    const tooltipSelection =
+      nodeSources && nodeSources.length === 1
+        ? `on node ${nodeSources[0]}`
+        : "across all nodes";
 
     const dashboardProps: GraphDashboardProps = {
       nodeIDs,
@@ -207,20 +234,24 @@ class NodeGraphs extends React.Component<NodeGraphsProps, {}> {
     const graphComponents = _.map(graphs, (graph, idx) => {
       const key = `nodes.${dashboard}.${idx}`;
       return (
-        <div key={key}>
-          <MetricsDataProvider id={key}>
-            { React.cloneElement(graph, forwardParams) }
-          </MetricsDataProvider>
-        </div>
+        <MetricsDataProvider
+          id={key}
+          key={key}
+          setTimeRange={this.props.setTimeRange}
+          setTimeScale={this.props.setTimeScale}
+          history={this.props.history}
+        >
+          {React.cloneElement(graph, forwardParams)}
+        </MetricsDataProvider>
       );
     });
 
     return (
       <div>
-        <Helmet>
-          <title>{ title }</title>
-        </Helmet>
-        <section className="section"><h1>{ title }</h1></section>
+        <Helmet title={title} />
+        <section className="section">
+          <h1 className="base-heading">{title}</h1>
+        </section>
         <PageConfig>
           <PageConfigItem>
             <Dropdown
@@ -236,6 +267,7 @@ class NodeGraphs extends React.Component<NodeGraphsProps, {}> {
               options={dashboardDropdownOptions}
               selected={dashboard}
               onChange={this.dashChange}
+              className="full-size"
             />
           </PageConfigItem>
           <PageConfigItem>
@@ -244,12 +276,14 @@ class NodeGraphs extends React.Component<NodeGraphsProps, {}> {
         </PageConfig>
         <section className="section">
           <div className="l-columns">
-            <div className="chart-group l-columns__left">
-              { graphComponents }
-            </div>
+            <div className="chart-group l-columns__left">{graphComponents}</div>
             <div className="l-columns__right">
               <Alerts />
-              <ClusterSummaryBar nodesSummary={this.props.nodesSummary} nodeSources={nodeSources} />
+              <ClusterSummaryBar
+                nodesSummary={this.props.nodesSummary}
+                nodeSources={nodeSources}
+                nodesSummaryValid={this.props.nodesSummaryValid}
+              />
             </div>
           </div>
         </section>
@@ -258,19 +292,22 @@ class NodeGraphs extends React.Component<NodeGraphsProps, {}> {
   }
 }
 
-export default connect(
-  (state: AdminUIState) => {
-    return {
-      nodesSummary: nodesSummarySelector(state),
-      nodesQueryValid: state.cachedData.nodes.valid,
-      livenessQueryValid: state.cachedData.nodes.valid,
-      hoverState: hoverStateSelector(state),
-    };
-  },
-  {
-    refreshNodes,
-    refreshLiveness,
-    hoverOn,
-    hoverOff,
-  },
+const mapStateToProps = (state: AdminUIState): MapStateToProps => ({
+  nodesSummary: nodesSummarySelector(state),
+  hoverState: hoverStateSelector(state),
+  nodesSummaryValid: selectNodesSummaryValid(state),
+});
+
+const mapDispatchToProps: MapDispatchToProps = {
+  refreshNodes,
+  refreshLiveness,
+  hoverOn,
+  hoverOff,
+  setTimeRange: setTimeRange,
+  setTimeScale: setTimeScale,
+};
+
+export default compose(
+  withRouter,
+  connect(mapStateToProps, mapDispatchToProps),
 )(NodeGraphs);

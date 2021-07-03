@@ -1,18 +1,16 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package pgdate
+
+import "github.com/cockroachdb/redact"
 
 //go:generate stringer -type=field
 
@@ -56,6 +54,14 @@ func (f field) AsSet() fieldSet {
 // name: "Year" vs "fieldYear".
 func (f field) Pretty() string {
 	return f.String()[5:]
+}
+
+// SafePretty wraps the generated String() function to return only the
+// name: "Year" vs "fieldYear" as a RedactableString.
+func (f field) SafePretty() redact.RedactableString {
+	// Note: this cast is safe because the String() method is generated
+	// by the stringer and only returns literal strings.
+	return redact.RedactableString(f.String()[5:])
 }
 
 // A fieldSet is an immutable aggregate of fields.
@@ -110,13 +116,15 @@ func (s fieldSet) HasAny(other fieldSet) bool {
 	return s&other != 0
 }
 
-func (s *fieldSet) String() string {
-	ret := "[ "
+func (s *fieldSet) String() string { return redact.StringWithoutMarkers(s) }
+
+// SafeFormat implements the redact.SafeFormatter interface.
+func (s *fieldSet) SafeFormat(w redact.SafePrinter, _ rune) {
+	w.SafeString("[ ")
 	for f := fieldMinimum; f <= fieldMaximum; f++ {
 		if s.Has(f) {
-			ret += f.Pretty() + " "
+			w.Printf("%v ", f.SafePretty())
 		}
 	}
-	ret += "]"
-	return ret
+	w.SafeRune(']')
 }

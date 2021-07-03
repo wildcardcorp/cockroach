@@ -1,16 +1,12 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package sql
 
@@ -21,14 +17,17 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
+	"github.com/cockroachdb/cockroach/pkg/sql/parser"
+	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgwirebase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/ring"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"github.com/cockroachdb/errors"
 	"github.com/lib/pq/oid"
-	"github.com/pkg/errors"
 )
 
 // This file contains utils and interfaces used by a connExecutor to communicate
@@ -62,10 +61,10 @@ const (
 //
 // The buffer is supposed to be used by one reader and one writer. The writer
 // adds commands to the buffer using Push(). The reader reads one command at a
-// time using curCmd(). The consumer is then supposed to create command results
+// time using CurCmd(). The consumer is then supposed to create command results
 // (the buffer is not involved in this).
 // The buffer internally maintains a cursor representing the reader's position.
-// The reader has to manually move the cursor using advanceOne(),
+// The reader has to manually move the cursor using AdvanceOne(),
 // seekToNextBatch() and rewind().
 // In practice, the writer is a module responsible for communicating with a SQL
 // client (i.e. pgwire.conn) and the reader is a connExecutor.
@@ -79,7 +78,7 @@ const (
 // queries as part of the "simple" protocol), or to different commands pipelined
 // by the cliend, separated from "sync" messages.
 //
-// push() can be called concurrently with curCmd().
+// push() can be called concurrently with CurCmd().
 //
 // The connExecutor will use the buffer to maintain a window around the
 // command it is currently executing. It will maintain enough history for
@@ -97,14 +96,14 @@ type StmtBuf struct {
 		cond *sync.Cond
 
 		// data contains the elements of the buffer.
-		data []Command
+		data ring.Buffer // []Command
 
 		// startPos indicates the index of the first command currently in data
 		// relative to the start of the connection.
 		startPos CmdPos
 		// curPos is the current position of the cursor going through the commands.
 		// At any time, curPos indicates the position of the command to be returned
-		// by curCmd().
+		// by CurCmd().
 		curPos CmdPos
 		// lastPos indicates the position of the last command that was pushed into
 		// the buffer.
@@ -116,18 +115,18 @@ type StmtBuf struct {
 // buffer.
 type Command interface {
 	fmt.Stringer
-	command()
+	// command returns a string representation of the command type (e.g.
+	// "prepare stmt", "exec stmt").
+	command() string
 }
 
 // ExecStmt is the command for running a query sent through the "simple" pgwire
 // protocol.
 type ExecStmt struct {
-	// Stmt can be nil, in which case a "empty query response" message should be
-	// produced.
-	Stmt tree.Statement
-
-	// SQL is the SQL string that was parsed into Stmt.
-	SQL string
+	// Information returned from parsing: AST, SQL, NumPlaceholders.
+	// Note that AST can be nil, in which case executing it should produce an
+	// "empty query response" message.
+	parser.Statement
 
 	// TimeReceived is the time at which the exec message was received
 	// from the client. Used to compute the service latency.
@@ -139,12 +138,17 @@ type ExecStmt struct {
 }
 
 // command implements the Command interface.
-func (ExecStmt) command() {}
+func (ExecStmt) command() string { return "exec stmt" }
 
 func (e ExecStmt) String() string {
 	// We have the original SQL, but we still use String() because it obfuscates
 	// passwords.
-	return fmt.Sprintf("ExecStmt: %s", e.Stmt.String())
+	s := "(empty)"
+	// e.AST could be nil in the case of a completely empty query.
+	if e.AST != nil {
+		s = e.AST.String()
+	}
+	return fmt.Sprintf("ExecStmt: %s", s)
 }
 
 var _ Command = ExecStmt{}
@@ -161,7 +165,7 @@ type ExecPortal struct {
 }
 
 // command implements the Command interface.
-func (ExecPortal) command() {}
+func (ExecPortal) command() string { return "exec portal" }
 
 func (e ExecPortal) String() string {
 	return fmt.Sprintf("ExecPortal name: %q", e.Name)
@@ -174,12 +178,10 @@ type PrepareStmt struct {
 	// Name of the prepared statement (optional).
 	Name string
 
-	// Stmt can be nil, in which case executing it should produce an "empty query
-	// response" message.
-	Stmt tree.Statement
-
-	// SQL is the string from which Stmt was parsed.
-	SQL string
+	// Information returned from parsing: AST, SQL, NumPlaceholders.
+	// Note that AST can be nil, in which case executing it should produce an
+	// "empty query response" message.
+	parser.Statement
 
 	TypeHints tree.PlaceholderTypes
 	// RawTypeHints is the representation of type hints exactly as specified by
@@ -190,12 +192,17 @@ type PrepareStmt struct {
 }
 
 // command implements the Command interface.
-func (PrepareStmt) command() {}
+func (PrepareStmt) command() string { return "prepare stmt" }
 
 func (p PrepareStmt) String() string {
 	// We have the original SQL, but we still use String() because it obfuscates
 	// passwords.
-	return fmt.Sprintf("PrepareStmt: %s", p.Stmt.String())
+	s := "(empty)"
+	// p.AST could be nil in the case of a completely empty query.
+	if p.AST != nil {
+		s = p.AST.String()
+	}
+	return fmt.Sprintf("PrepareStmt: %s", s)
 }
 
 var _ Command = PrepareStmt{}
@@ -208,7 +215,7 @@ type DescribeStmt struct {
 }
 
 // command implements the Command interface.
-func (DescribeStmt) command() {}
+func (DescribeStmt) command() string { return "describe stmt" }
 
 func (d DescribeStmt) String() string {
 	return fmt.Sprintf("Describe: %q", d.Name)
@@ -248,7 +255,7 @@ type BindStmt struct {
 }
 
 // command implements the Command interface.
-func (BindStmt) command() {}
+func (BindStmt) command() string { return "bind stmt" }
 
 func (b BindStmt) String() string {
 	return fmt.Sprintf("BindStmt: %q->%q", b.PreparedStatementName, b.PortalName)
@@ -263,7 +270,7 @@ type DeletePreparedStmt struct {
 }
 
 // command implements the Command interface.
-func (DeletePreparedStmt) command() {}
+func (DeletePreparedStmt) command() string { return "delete stmt" }
 
 func (d DeletePreparedStmt) String() string {
 	return fmt.Sprintf("DeletePreparedStmt: %q", d.Name)
@@ -283,7 +290,7 @@ var _ Command = DeletePreparedStmt{}
 type Sync struct{}
 
 // command implements the Command interface.
-func (Sync) command() {}
+func (Sync) command() string { return "sync" }
 
 func (Sync) String() string {
 	return "Sync"
@@ -296,7 +303,7 @@ var _ Command = Sync{}
 type Flush struct{}
 
 // command implements the Command interface.
-func (Flush) command() {}
+func (Flush) command() string { return "flush" }
 
 func (Flush) String() string {
 	return "Flush"
@@ -316,7 +323,7 @@ type CopyIn struct {
 }
 
 // command implements the Command interface.
-func (CopyIn) command() {}
+func (CopyIn) command() string { return "copy" }
 
 func (CopyIn) String() string {
 	return "CopyIn"
@@ -331,7 +338,7 @@ var _ Command = CopyIn{}
 type DrainRequest struct{}
 
 // command implements the Command interface.
-func (DrainRequest) command() {}
+func (DrainRequest) command() string { return "drain" }
 
 func (DrainRequest) String() string {
 	return "Drain"
@@ -348,7 +355,7 @@ type SendError struct {
 }
 
 // command implements the Command interface.
-func (SendError) command() {}
+func (SendError) command() string { return "send error" }
 
 func (s SendError) String() string {
 	return fmt.Sprintf("SendError: %s", s.Err)
@@ -371,8 +378,8 @@ func (buf *StmtBuf) Init() {
 }
 
 // Close marks the buffer as closed. Once Close() is called, no further push()es
-// are allowed. If a reader is blocked on a curCmd() call, it is unblocked with
-// io.EOF. Any further curCmd() call also returns io.EOF (even if some
+// are allowed. If a reader is blocked on a CurCmd() call, it is unblocked with
+// io.EOF. Any further CurCmd() call also returns io.EOF (even if some
 // commands were already available in the buffer before the Close()).
 //
 // Close() is idempotent.
@@ -383,7 +390,7 @@ func (buf *StmtBuf) Close() {
 	buf.mu.Unlock()
 }
 
-// Push adds a Command to the end of the buffer. If a curCmd() call was blocked
+// Push adds a Command to the end of the buffer. If a CurCmd() call was blocked
 // waiting for this command to arrive, it will be woken up.
 //
 // An error is returned if the buffer has been closed.
@@ -391,16 +398,16 @@ func (buf *StmtBuf) Push(ctx context.Context, cmd Command) error {
 	buf.mu.Lock()
 	defer buf.mu.Unlock()
 	if buf.mu.closed {
-		return fmt.Errorf("buffer is closed")
+		return errors.AssertionFailedf("buffer is closed")
 	}
-	buf.mu.data = append(buf.mu.data, cmd)
+	buf.mu.data.AddLast(cmd)
 	buf.mu.lastPos++
 
 	buf.mu.cond.Signal()
 	return nil
 }
 
-// curCmd returns the Command currently indicated by the cursor. Besides the
+// CurCmd returns the Command currently indicated by the cursor. Besides the
 // Command itself, the command's position is also returned; the position can be
 // used to later rewind() to this Command.
 //
@@ -409,7 +416,7 @@ func (buf *StmtBuf) Push(ctx context.Context, cmd Command) error {
 //
 // If the buffer has previously been Close()d, or is closed while this is
 // blocked, io.EOF is returned.
-func (buf *StmtBuf) curCmd() (Command, CmdPos, error) {
+func (buf *StmtBuf) CurCmd() (Command, CmdPos, error) {
 	buf.mu.Lock()
 	defer buf.mu.Unlock()
 	for {
@@ -421,12 +428,13 @@ func (buf *StmtBuf) curCmd() (Command, CmdPos, error) {
 		if err != nil {
 			return nil, 0, err
 		}
-		if cmdIdx < len(buf.mu.data) {
-			return buf.mu.data[cmdIdx], curPos, nil
+		len := buf.mu.data.Len()
+		if cmdIdx < len {
+			return buf.mu.data.Get(cmdIdx).(Command), curPos, nil
 		}
-		if cmdIdx != len(buf.mu.data) {
-			return nil, 0, errors.Errorf(
-				"can only wait for next command; corrupt cursor: %d", curPos)
+		if cmdIdx != len {
+			return nil, 0, errors.AssertionFailedf(
+				"can only wait for next command; corrupt cursor: %d", errors.Safe(curPos))
 		}
 		// Wait for the next Command to arrive to the buffer.
 		buf.mu.cond.Wait()
@@ -441,9 +449,9 @@ func (buf *StmtBuf) curCmd() (Command, CmdPos, error) {
 // error.
 func (buf *StmtBuf) translatePosLocked(pos CmdPos) (int, error) {
 	if pos < buf.mu.startPos {
-		return 0, errors.Errorf(
+		return 0, errors.AssertionFailedf(
 			"position %d no longer in buffer (buffer starting at %d)",
-			pos, buf.mu.startPos)
+			errors.Safe(pos), errors.Safe(buf.mu.startPos))
 	}
 	return int(pos - buf.mu.startPos), nil
 }
@@ -468,18 +476,20 @@ func (buf *StmtBuf) ltrim(ctx context.Context, pos CmdPos) {
 		if buf.mu.startPos == pos {
 			break
 		}
-		buf.mu.data[0] = nil
-		buf.mu.data = buf.mu.data[1:]
+		buf.mu.data.RemoveFirst()
 		buf.mu.startPos++
 	}
 }
 
-// advanceOne advances the cursor one Command over. The command over which the
-// cursor will be positioned when this returns may not be in the buffer yet.
-func (buf *StmtBuf) advanceOne() {
+// AdvanceOne advances the cursor one Command over. The command over which
+// the cursor will be positioned when this returns may not be in the buffer
+// yet. The previous CmdPos is returned.
+func (buf *StmtBuf) AdvanceOne() CmdPos {
 	buf.mu.Lock()
+	prev := buf.mu.curPos
 	buf.mu.curPos++
 	buf.mu.Unlock()
+	return prev
 }
 
 // seekToNextBatch moves the cursor position to the start of the next batch of
@@ -501,16 +511,16 @@ func (buf *StmtBuf) seekToNextBatch() error {
 		buf.mu.Unlock()
 		return err
 	}
-	if cmdIdx == len(buf.mu.data) {
+	if cmdIdx == buf.mu.data.Len() {
 		buf.mu.Unlock()
-		return errors.Errorf("invalid seek start point")
+		return errors.AssertionFailedf("invalid seek start point")
 	}
 	buf.mu.Unlock()
 
 	var foundSync bool
 	for !foundSync {
-		buf.advanceOne()
-		_, pos, err := buf.curCmd()
+		buf.AdvanceOne()
+		_, pos, err := buf.CurCmd()
 		if err != nil {
 			return err
 		}
@@ -521,7 +531,7 @@ func (buf *StmtBuf) seekToNextBatch() error {
 			return err
 		}
 
-		if _, ok := buf.mu.data[cmdIdx].(Sync); ok {
+		if _, ok := buf.mu.data.Get(cmdIdx).(Sync); ok {
 			foundSync = true
 		}
 
@@ -530,14 +540,21 @@ func (buf *StmtBuf) seekToNextBatch() error {
 	return nil
 }
 
-// rewind resets the buffer's position to pos.
-func (buf *StmtBuf) rewind(ctx context.Context, pos CmdPos) {
+// Rewind resets the buffer's position to pos.
+func (buf *StmtBuf) Rewind(ctx context.Context, pos CmdPos) {
 	buf.mu.Lock()
 	defer buf.mu.Unlock()
 	if pos < buf.mu.startPos {
 		log.Fatalf(ctx, "attempting to rewind below buffer start")
 	}
 	buf.mu.curPos = pos
+}
+
+// Len returns the buffer's length.
+func (buf *StmtBuf) Len() int {
+	buf.mu.Lock()
+	defer buf.mu.Unlock()
+	return buf.mu.data.Len()
 }
 
 // RowDescOpt specifies whether a result needs a row description message.
@@ -574,7 +591,11 @@ type ClientComm interface {
 		descOpt RowDescOpt,
 		pos CmdPos,
 		formatCodes []pgwirebase.FormatCode,
-		conv sessiondata.DataConversionConfig,
+		conv sessiondatapb.DataConversionConfig,
+		location *time.Location,
+		limit int,
+		portalName string,
+		implicitTxn bool,
 	) CommandResult
 	// CreatePrepareResult creates a result for a PrepareStmt command.
 	CreatePrepareResult(pos CmdPos) ParseResult
@@ -591,7 +612,7 @@ type ClientComm interface {
 	// CreateErrorResult creates a result on which only errors can be communicated
 	// to the client.
 	CreateErrorResult(pos CmdPos) ErrorResult
-	// CreateEmptyQueryResult creates a result for an emptry-string query.
+	// CreateEmptyQueryResult creates a result for an empty-string query.
 	CreateEmptyQueryResult(pos CmdPos) EmptyQueryResult
 	// CreateCopyInResult creates a result for a Copy-in command.
 	CreateCopyInResult(pos CmdPos) CopyInResult
@@ -618,31 +639,20 @@ type ClientComm interface {
 type CommandResult interface {
 	RestrictedCommandResult
 	CommandResultClose
-
-	// SetLimit is used when executing a portal to set a limit on the number of
-	// rows to be returned. We don't currently properly support this feature of
-	// the Postgres protocol; instead, we'll return an error if the number of rows
-	// produced is larger than this limit.
-	SetLimit(n int)
 }
 
 // CommandResultErrBase is the subset of CommandResult dealing with setting a
 // query execution error.
 type CommandResultErrBase interface {
 	// SetError accumulates an execution error that needs to be reported to the
-	// client. No further calls other than OverwriteError(), Close() and Discard()
-	// are allowed. In particular, CloseWithErr() is not allowed.
+	// client. No further calls other than SetError(), Close() and Discard() are
+	// allowed.
+	//
+	// Calling SetError() a second time overwrites the previously set error.
 	SetError(error)
 
 	// Err returns the error previously set with SetError(), if any.
 	Err() error
-
-	// OverwriteError is like SetError(), except it can be called after SetError()
-	// has already been called and it will overwrite the error. Used by high-level
-	// code when it has a strong opinion about what the error that should be
-	// returned to the client is and doesn't much care about whether an error has
-	// already been set on the result.
-	OverwriteError(error)
 }
 
 // ResultBase is the common interface implemented by all the different command
@@ -657,24 +667,14 @@ type ResultBase interface {
 type CommandResultClose interface {
 	// Close marks a result as complete. No further uses of the CommandResult are
 	// allowed after this call. All results must be eventually closed through
-	// Close()/CloseWithErr()/Discard(), except in case query processing has
-	// encountered an irrecoverable error and the client connection will be
-	// closed; in such cases it is not mandated that these functions are called on
-	// the result that may have been open at the time the error occurred.
+	// Close()/Discard(), except in case query processing has encountered an
+	// irrecoverable error and the client connection will be closed; in such
+	// cases it is not mandated that these functions are called on the result
+	// that may have been open at the time the error occurred.
 	// NOTE(andrei): We might want to tighten the contract if the results get any
 	// state that needs to be closed even when the whole connection is about to be
 	// terminated.
-	Close(TransactionStatusIndicator)
-
-	// CloseWithErr is like Close, except it tells the client that an execution
-	// error has happened. All rows previously accumulated on the result might be
-	// discarded; only this error might be delivered to the client as a result of
-	// the command.
-	//
-	// After calling CloseWithErr it is illegal to create CommandResults for any
-	// command in the same batch as the one being closed. The contract is that the
-	// next result created corresponds to the first command in the next batch.
-	CloseWithErr(err error)
+	Close(context.Context, TransactionStatusIndicator)
 
 	// Discard is called to mark the fact that the result is being disposed off.
 	// No completion message will be sent to the client. The expectation is that
@@ -690,11 +690,19 @@ type CommandResultClose interface {
 type RestrictedCommandResult interface {
 	CommandResultErrBase
 
+	// BufferParamStatusUpdate buffers a parameter status update to the result.
+	// This gets flushed only when the CommandResult is closed.
+	BufferParamStatusUpdate(string, string)
+
+	// BufferNotice appends a notice to the result.
+	// This gets flushed only when the CommandResult is closed.
+	BufferNotice(notice pgnotice.Notice)
+
 	// SetColumns informs the client about the schema of the result. The columns
 	// can be nil.
 	//
 	// This needs to be called (once) before AddRow.
-	SetColumns(context.Context, sqlbase.ResultColumns)
+	SetColumns(context.Context, colinfo.ResultColumns)
 
 	// ResetStmtType allows a client to change the statement type of the current
 	// result, from the original one set when the result was created trough
@@ -709,11 +717,17 @@ type RestrictedCommandResult interface {
 
 	// IncrementRowsAffected increments a counter by n. This is used for all
 	// result types other than tree.Rows.
-	IncrementRowsAffected(n int)
+	IncrementRowsAffected(ctx context.Context, n int)
 
 	// RowsAffected returns either the number of times AddRow was called, or the
 	// sum of all n passed into IncrementRowsAffected.
 	RowsAffected() int
+
+	// DisableBuffering can be called during execution to ensure that
+	// the results accumulated so far, and all subsequent rows added
+	// to this CommandResult, will be flushed immediately to the client.
+	// This is currently used for sinkless changefeeds.
+	DisableBuffering()
 }
 
 // DescribeResult represents the result of a Describe command (for either
@@ -721,17 +735,17 @@ type RestrictedCommandResult interface {
 type DescribeResult interface {
 	ResultBase
 
-	// SetInTypes tells the client about the inferred placeholder types.
-	SetInTypes([]oid.Oid)
+	// SetInferredTypes tells the client about the inferred placeholder types.
+	SetInferredTypes([]oid.Oid)
 	// SetNoDataDescription is used to tell the client that the prepared statement
 	// or portal produces no rows.
 	SetNoDataRowDescription()
 	// SetPrepStmtOutput tells the client about the results schema of a prepared
 	// statement.
-	SetPrepStmtOutput(context.Context, sqlbase.ResultColumns)
+	SetPrepStmtOutput(context.Context, colinfo.ResultColumns)
 	// SetPortalOutput tells the client about the results schema and formatting of
 	// a portal.
-	SetPortalOutput(context.Context, sqlbase.ResultColumns, []pgwirebase.FormatCode)
+	SetPortalOutput(context.Context, colinfo.ResultColumns, []pgwirebase.FormatCode)
 }
 
 // ParseResult represents the result of a Parse command.
@@ -830,7 +844,12 @@ type rewindCapability struct {
 // unlocks the respective ClientComm.
 func (rc *rewindCapability) rewindAndUnlock(ctx context.Context) {
 	rc.cl.RTrim(ctx, rc.rewindPos)
-	rc.buf.rewind(ctx, rc.rewindPos)
+	rc.buf.Rewind(ctx, rc.rewindPos)
+	rc.cl.Close()
+}
+
+// close closes the underlying ClientLock.
+func (rc *rewindCapability) close() {
 	rc.cl.Close()
 }
 
@@ -839,99 +858,118 @@ type resCloseType bool
 const closed resCloseType = true
 const discarded resCloseType = false
 
-// bufferedCommandResult is a CommandResult that buffers rows and can call a
-// provided callback when closed.
-type bufferedCommandResult struct {
+// streamingCommandResult is a CommandResult that streams rows on the channel
+// and can call a provided callback when closed.
+type streamingCommandResult struct {
+	// All the data (the rows and the metadata) are written into w. The
+	// goroutine writing into this streamingCommandResult might block depending
+	// on the synchronization strategy.
+	w ieResultWriter
+
 	err          error
-	rows         []tree.Datums
 	rowsAffected int
-	cols         sqlbase.ResultColumns
 
-	// errOnly, if set, makes AddRow() panic. This can be used when the execution
-	// of the query is not expected to produce any results.
-	errOnly bool
-
-	// closeCallback, if set, is called when Close()/CloseWithErr()/Discard() is
-	// called.
-	closeCallback func(*bufferedCommandResult, resCloseType, error)
+	// closeCallback, if set, is called when Close()/Discard() is called.
+	closeCallback func(*streamingCommandResult, resCloseType)
 }
 
-var _ RestrictedCommandResult = &bufferedCommandResult{}
+var _ RestrictedCommandResult = &streamingCommandResult{}
+var _ CommandResultClose = &streamingCommandResult{}
 
 // SetColumns is part of the RestrictedCommandResult interface.
-func (r *bufferedCommandResult) SetColumns(_ context.Context, cols sqlbase.ResultColumns) {
-	if r.errOnly {
-		panic("SetColumns() called when errOnly is set")
+func (r *streamingCommandResult) SetColumns(ctx context.Context, cols colinfo.ResultColumns) {
+	// The interface allows for cols to be nil, yet the iterator result expects
+	// non-nil value to indicate that it was the column metadata.
+	if cols == nil {
+		cols = colinfo.ResultColumns{}
 	}
-	r.cols = cols
+	_ = r.w.addResult(ctx, ieIteratorResult{cols: cols})
+}
+
+// BufferParamStatusUpdate is part of the RestrictedCommandResult interface.
+func (r *streamingCommandResult) BufferParamStatusUpdate(key string, val string) {
+	panic("unimplemented")
+}
+
+// BufferNotice is part of the RestrictedCommandResult interface.
+func (r *streamingCommandResult) BufferNotice(notice pgnotice.Notice) {
+	panic("unimplemented")
 }
 
 // ResetStmtType is part of the RestrictedCommandResult interface.
-func (r *bufferedCommandResult) ResetStmtType(stmt tree.Statement) {
+func (r *streamingCommandResult) ResetStmtType(stmt tree.Statement) {
 	panic("unimplemented")
 }
 
 // AddRow is part of the RestrictedCommandResult interface.
-func (r *bufferedCommandResult) AddRow(ctx context.Context, row tree.Datums) error {
-	if r.errOnly {
-		panic("AddRow() called when errOnly is set")
-	}
+func (r *streamingCommandResult) AddRow(ctx context.Context, row tree.Datums) error {
+	// AddRow() and IncrementRowsAffected() are never called on the same command
+	// result, so we will not double count the affected rows by an increment
+	// here.
+	r.rowsAffected++
 	rowCopy := make(tree.Datums, len(row))
 	copy(rowCopy, row)
-	r.rows = append(r.rows, rowCopy)
-	return nil
+	return r.w.addResult(ctx, ieIteratorResult{row: rowCopy})
+}
+
+func (r *streamingCommandResult) DisableBuffering() {
+	panic("cannot disable buffering here")
 }
 
 // SetError is part of the RestrictedCommandResult interface.
-func (r *bufferedCommandResult) SetError(err error) {
+func (r *streamingCommandResult) SetError(err error) {
 	r.err = err
-}
-
-// OverwriteError is part of the RestrictedCommandResult interface.
-func (r *bufferedCommandResult) OverwriteError(err error) {
-	r.err = err
+	// Note that we intentionally do not send the error on the channel (when it
+	// is present) since we might replace the error with another one later which
+	// is allowed by the interface. An example of this is queryDone() closure
+	// in execStmtInOpenState().
 }
 
 // Err is part of the RestrictedCommandResult interface.
-func (r *bufferedCommandResult) Err() error {
+func (r *streamingCommandResult) Err() error {
 	return r.err
 }
 
 // IncrementRowsAffected is part of the RestrictedCommandResult interface.
-func (r *bufferedCommandResult) IncrementRowsAffected(n int) {
+func (r *streamingCommandResult) IncrementRowsAffected(ctx context.Context, n int) {
 	r.rowsAffected += n
+	// streamingCommandResult might be used outside of the internal executor
+	// (i.e. not by rowsIterator) in which case the channel is not set.
+	if r.w != nil {
+		_ = r.w.addResult(ctx, ieIteratorResult{rowsAffectedIncrement: &n})
+	}
 }
 
 // RowsAffected is part of the RestrictedCommandResult interface.
-func (r *bufferedCommandResult) RowsAffected() int {
+func (r *streamingCommandResult) RowsAffected() int {
 	return r.rowsAffected
 }
 
-// SetLimit is part of the CommandResult interface.
-func (r *bufferedCommandResult) SetLimit(limit int) {
-	if limit != 0 {
-		panic("unimplemented")
-	}
-}
-
-// Close is part of the CommandResult interface.
-func (r *bufferedCommandResult) Close(TransactionStatusIndicator) {
+// Close is part of the CommandResultClose interface.
+func (r *streamingCommandResult) Close(context.Context, TransactionStatusIndicator) {
 	if r.closeCallback != nil {
-		r.closeCallback(r, closed, nil /* err */)
-	}
-}
-
-// CloseWithErr is part of the CommandResult interface.
-func (r *bufferedCommandResult) CloseWithErr(err error) {
-	r.err = err
-	if r.closeCallback != nil {
-		r.closeCallback(r, closed, err)
+		r.closeCallback(r, closed)
 	}
 }
 
 // Discard is part of the CommandResult interface.
-func (r *bufferedCommandResult) Discard() {
+func (r *streamingCommandResult) Discard() {
 	if r.closeCallback != nil {
-		r.closeCallback(r, discarded, nil /* err */)
+		r.closeCallback(r, discarded)
 	}
+}
+
+// SetInferredTypes is part of the DescribeResult interface.
+func (r *streamingCommandResult) SetInferredTypes([]oid.Oid) {}
+
+// SetNoDataRowDescription is part of the DescribeResult interface.
+func (r *streamingCommandResult) SetNoDataRowDescription() {}
+
+// SetPrepStmtOutput is part of the DescribeResult interface.
+func (r *streamingCommandResult) SetPrepStmtOutput(context.Context, colinfo.ResultColumns) {}
+
+// SetPortalOutput is part of the DescribeResult interface.
+func (r *streamingCommandResult) SetPortalOutput(
+	context.Context, colinfo.ResultColumns, []pgwirebase.FormatCode,
+) {
 }

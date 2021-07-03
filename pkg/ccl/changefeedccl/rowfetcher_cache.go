@@ -11,10 +11,18 @@ package changefeedccl
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/keys"
+	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/hydratedtables"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -26,42 +34,93 @@ import (
 // StartScanFrom can be used to turn that key (or all the keys making up the
 // column families of one row) into a row.
 type rowFetcherCache struct {
-	leaseMgr *sql.LeaseManager
-	fetchers map[*sqlbase.ImmutableTableDescriptor]*row.Fetcher
+	codec    keys.SQLCodec
+	leaseMgr *lease.Manager
+	fetchers map[idVersion]*row.Fetcher
 
-	a sqlbase.DatumAlloc
+	collection *descs.Collection
+	db         *kv.DB
+
+	a rowenc.DatumAlloc
 }
 
-func newRowFetcherCache(leaseMgr *sql.LeaseManager) *rowFetcherCache {
+type idVersion struct {
+	id      descpb.ID
+	version descpb.DescriptorVersion
+}
+
+func newRowFetcherCache(
+	ctx context.Context,
+	codec keys.SQLCodec,
+	settings *cluster.Settings,
+	leaseMgr *lease.Manager,
+	hydratedTables *hydratedtables.Cache,
+	db *kv.DB,
+) *rowFetcherCache {
 	return &rowFetcherCache{
-		leaseMgr: leaseMgr,
-		fetchers: make(map[*sqlbase.ImmutableTableDescriptor]*row.Fetcher),
+		codec:      codec,
+		leaseMgr:   leaseMgr,
+		collection: descs.NewCollection(settings, leaseMgr, hydratedTables),
+		db:         db,
+		fetchers:   make(map[idVersion]*row.Fetcher),
 	}
 }
 
 func (c *rowFetcherCache) TableDescForKey(
 	ctx context.Context, key roachpb.Key, ts hlc.Timestamp,
-) (*sqlbase.ImmutableTableDescriptor, error) {
-	var tableDesc *sqlbase.ImmutableTableDescriptor
+) (catalog.TableDescriptor, error) {
+	var tableDesc catalog.TableDescriptor
+	key, err := c.codec.StripTenantPrefix(key)
+	if err != nil {
+		return nil, err
+	}
 	for skippedCols := 0; ; {
-		remaining, tableID, _, err := sqlbase.DecodeTableIDIndexID(key)
+		remaining, tableID, _, err := rowenc.DecodePartialTableIDIndexID(key)
 		if err != nil {
-			return nil, err
-		}
-		// No caching of these are attempted, since the lease manager does its
-		// own caching.
-		tableDesc, _, err = c.leaseMgr.Acquire(ctx, ts, tableID)
-		if err != nil {
-			return nil, err
-		}
-		// Immediately release the lease, since we only need it for the exact
-		// timestamp requested.
-		if err := c.leaseMgr.Release(tableDesc); err != nil {
 			return nil, err
 		}
 
+		// Retrieve the target TableDescriptor from the lease manager. No caching
+		// is attempted because the lease manager does its own caching.
+		desc, _, err := c.leaseMgr.Acquire(ctx, ts, tableID)
+		if err != nil {
+			// Manager can return all kinds of errors during chaos, but based on
+			// its usage, none of them should ever be terminal.
+			return nil, MarkRetryableError(err)
+		}
+		// Immediately release the lease, since we only need it for the exact
+		// timestamp requested.
+		if err := c.leaseMgr.Release(desc); err != nil {
+			return nil, err
+		}
+		tableDesc = desc.(catalog.TableDescriptor)
+		if tableDesc.ContainsUserDefinedTypes() {
+			// If the table contains user defined types, then use the descs.Collection
+			// to retrieve a TableDescriptor with type metadata hydrated. We open a
+			// transaction here only because the descs.Collection needs one to get
+			// a read timestamp. We do this lookup again behind a conditional to avoid
+			// allocating any transaction metadata if the table has user defined types.
+			// This can be bypassed once (#53751) is fixed. Once the descs.Collection can
+			// take in a read timestamp rather than a whole transaction, we can use the
+			// descs.Collection directly here.
+			// TODO (SQL Schema): #53751.
+			if err := c.db.Txn(ctx, func(ctx context.Context, txn *kv.Txn) error {
+				txn.SetFixedTimestamp(ctx, ts)
+				var err error
+				tableDesc, err = c.collection.GetImmutableTableByID(ctx, txn, tableID, tree.ObjectLookupFlags{})
+				return err
+			}); err != nil {
+				// Manager can return all kinds of errors during chaos, but based on
+				// its usage, none of them should ever be terminal.
+				return nil, MarkRetryableError(err)
+			}
+			// Immediately release the lease, since we only need it for the exact
+			// timestamp requested.
+			c.collection.ReleaseAll(ctx)
+		}
+
 		// Skip over the column data.
-		for ; skippedCols < len(tableDesc.PrimaryIndex.ColumnIDs); skippedCols++ {
+		for ; skippedCols < tableDesc.GetPrimaryIndex().NumColumns(); skippedCols++ {
 			l, err := encoding.PeekLength(remaining)
 			if err != nil {
 				return nil, err
@@ -80,38 +139,55 @@ func (c *rowFetcherCache) TableDescForKey(
 }
 
 func (c *rowFetcherCache) RowFetcherForTableDesc(
-	tableDesc *sqlbase.ImmutableTableDescriptor,
+	tableDesc catalog.TableDescriptor,
 ) (*row.Fetcher, error) {
-	if rf, ok := c.fetchers[tableDesc]; ok {
+	idVer := idVersion{id: tableDesc.GetID(), version: tableDesc.GetVersion()}
+	// Ensure that all user defined types are up to date with the cached
+	// version and the desired version to use the cache. It is safe to use
+	// UserDefinedTypeColsHaveSameVersion if we have a hit because we are
+	// guaranteed that the tables have the same version. Additionally, these
+	// fetchers are always initialized with a single tabledesc.Immutable.
+	if rf, ok := c.fetchers[idVer]; ok &&
+		catalog.UserDefinedTypeColsHaveSameVersion(tableDesc, rf.GetTables()[0].(catalog.TableDescriptor)) {
 		return rf, nil
 	}
-
 	// TODO(dan): Allow for decoding a subset of the columns.
-	colIdxMap := make(map[sqlbase.ColumnID]int)
+	var colIdxMap catalog.TableColMap
 	var valNeededForCol util.FastIntSet
-	for colIdx, col := range tableDesc.Columns {
-		colIdxMap[col.ID] = colIdx
-		valNeededForCol.Add(colIdx)
+	for _, col := range tableDesc.PublicColumns() {
+		colIdxMap.Set(col.GetID(), col.Ordinal())
+		valNeededForCol.Add(col.Ordinal())
 	}
 
 	var rf row.Fetcher
+	rfArgs := row.FetcherTableArgs{
+		Spans:            tableDesc.AllIndexSpans(c.codec),
+		Desc:             tableDesc,
+		Index:            tableDesc.GetPrimaryIndex().IndexDesc(),
+		ColIdxMap:        colIdxMap,
+		IsSecondaryIndex: false,
+		Cols:             make([]descpb.ColumnDescriptor, len(tableDesc.PublicColumns())),
+		ValNeededForCol:  valNeededForCol,
+	}
+	for i, col := range tableDesc.PublicColumns() {
+		rfArgs.Cols[i] = *col.ColumnDesc()
+	}
 	if err := rf.Init(
-		false /* reverse */, false /* returnRangeInfo */, false /* isCheck */, &c.a,
-		row.FetcherTableArgs{
-			Spans:            tableDesc.AllIndexSpans(),
-			Desc:             tableDesc,
-			Index:            &tableDesc.PrimaryIndex,
-			ColIdxMap:        colIdxMap,
-			IsSecondaryIndex: false,
-			Cols:             tableDesc.Columns,
-			ValNeededForCol:  valNeededForCol,
-		},
+		context.TODO(),
+		c.codec,
+		false, /* reverse */
+		descpb.ScanLockingStrength_FOR_NONE,
+		descpb.ScanLockingWaitPolicy_BLOCK,
+		false, /* isCheck */
+		&c.a,
+		nil, /* memMonitor */
+		rfArgs,
 	); err != nil {
 		return nil, err
 	}
 	// TODO(dan): Bound the size of the cache. Resolved notifications will let
 	// us evict anything for timestamps entirely before the notification. Then
 	// probably an LRU just in case?
-	c.fetchers[tableDesc] = &rf
+	c.fetchers[idVer] = &rf
 	return &rf, nil
 }

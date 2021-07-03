@@ -46,78 +46,78 @@ A SQL query arrives at the server through the Postgres wire protocol
 existing client drivers and applications). The `pgwire` package
 implements protocol-related functionality; once a client connection is
 authenticated, it is represented by a
-[`pgwire.v3Conn`](https://github.com/cockroachdb/cockroach/blob/33c18ad1bcdb37ed6ed428b7527148977a8c566a/pkg/sql/pgwire/v3.go#L164)
+[`pgwire.conn`](https://github.com/cockroachdb/cockroach/blob/708df8bca077276b9161d68486beae26e77e4377/pkg/sql/pgwire/conn.go#L54)
 struct (it wraps a [`net.Conn`](https://golang.org/pkg/net/#Conn)
 interface - Go's
-sockets). [`v3Conn.serve()`](https://github.com/cockroachdb/cockroach/blob/33c18ad1bcdb37ed6ed428b7527148977a8c566a/pkg/sql/pgwire/v3.go#L313)
-implements the "read query - execute it - return result" loop. The
-protocol is message-oriented: for the lifetime of the connection, we
-[read a
-message](https://github.com/cockroachdb/cockroach/blob/677f6f18b/pkg/sql/pgwire/v3.go#L324)
-usually representing one or more SQL statements, pass it to the
-`sql.Executor` for executing all the statements in the batch and, once
-that's done and the results have been produced, [serialize them and
-send them to the
-client](https://github.com/cockroachdb/cockroach/blob/677f6f18b/pkg/sql/pgwire/v3.go#L755).
+sockets).
+[`conn.serveImpl`](https://github.com/cockroachdb/cockroach/blob/708df8bca077276b9161d68486beae26e77e4377/pkg/sql/pgwire/conn.go#L207)
+implements the "read query - parse it - push it to `connExecutor` for
+execution" loop. The protocol is message-oriented: for the lifetime of the
+connection, we
+[read a message](https://github.com/cockroachdb/cockroach/blob/708df8bca077276b9161d68486beae26e77e4377/pkg/sql/pgwire/conn.go#L323)
+usually representing one or more SQL statements, parse the queries, pass them
+to the `connExecutor` for executing all the statements in the batch and, once
+that's done and the results have been produced,
+[serialize and buffer them](https://github.com/cockroachdb/cockroach/blob/708df8bca077276b9161d68486beae26e77e4377/pkg/sql/pgwire/conn.go#L1109)
+and then possibly
+[send the buffered results to the client](https://github.com/cockroachdb/cockroach/blob/708df8bca077276b9161d68486beae26e77e4377/pkg/sql/pgwire/conn.go#L1333).
 
-Notice that the results are not streamed to the client and, moreover, a whole batch of statements might be executed before any results are sent back.
+Notice that the results are not streamed to the client and, moreover, a whole
+batch of statements might be executed before any results are sent back.
 
-## SQL Executor
+## connExecutor
 
 The
-[`sql.Executor`](https://github.com/cockroachdb/cockroach/blob/33c18ad1bcdb37ed6ed428b7527148977a8c566a/pkg/sql/executor.go#L194)
-is responsible for parsing statements, executing them and returning
-results back to the `pgwire.v3Conn`. The main entry point is
-[`Executor.execRequest()`](https://github.com/cockroachdb/cockroach/blob/677f6f18b63355cb2d040b251af202fe6505128f/pkg/sql/executor.go#L481),
-which receives a batch of statements as a raw `string`. The execution
-of the batch is done in the context of a
-[`sql.Session`](https://github.com/cockroachdb/cockroach/blob/677f6f18b63355cb2d040b251af202fe6505128f/pkg/sql/session.go#L61)
+[`connExecutor`](https://github.com/cockroachdb/cockroach/blob/708df8bca077276b9161d68486beae26e77e4377/pkg/sql/conn_executor.go#L62)
+is responsible for parsing and executing statements pushed into its
+[statement buffer](https://github.com/cockroachdb/cockroach/blob/708df8bca077276b9161d68486beae26e77e4377/pkg/sql/conn_executor.go#L910)
+by a given client connection as well as pushing the results back to the
+`pgwire.conn`. The main entry point is
+[`connExecutor.execCmd`](https://github.com/cockroachdb/cockroach/blob/708df8bca077276b9161d68486beae26e77e4377/pkg/sql/conn_executor.go#L1320),
+which reads the current
+[command](https://github.com/cockroachdb/cockroach/blob/708df8bca077276b9161d68486beae26e77e4377/pkg/sql/conn_io.go#L115)
+from the statement buffer and executes a query if necessary (not all commands
+require query execution). The execution of the queries is done in the context
+of a
+[`sessiondata.SessionData`](https://github.com/cockroachdb/cockroach/blob/708df8bca077276b9161d68486beae26e77e4377/pkg/sql/sessiondata/session_data.go#L25)
 object which accumulates information about the state of the connection
 (e.g. the database that has been selected, the various variables that
-can be set, the transaction status), as well as accounting the memory
-in use at any given time by this connection. The `Executor` also
-manipulates a
-[`planner`](https://github.com/cockroachdb/cockroach/blob/677f6f18b63355cb2d040b251af202fe6505128f/pkg/sql/planner.go#L39)
+can be set) as well as of
+[transaction state](https://github.com/cockroachdb/cockroach/blob/708df8bca077276b9161d68486beae26e77e4377/pkg/sql/conn_executor.go#L918).
+The `connExecutor` also manipulates a
+[`planner`](https://github.com/cockroachdb/cockroach/blob/708df8bca077276b9161d68486beae26e77e4377/pkg/sql/planner.go#L123)
 struct which provides the functionality around actually planning and
 executing a query.
 
-`Executor.execRequest()` implements a state-machine of sorts by
-receiving batches of statements from `pgwire`, executing them one by
-one, updating the `Session`'s transaction state (did a new transaction
-just begin or an old transaction just end? did we encounter an error
-which forces us to abort the current transaction?) and returning
-results and control back to pgwire. The next batch of statements
-received from the client will continue from the transaction state left
-by the previous batch.
+`connExecutor` implements a state-machine by receiving batches of statements
+from `pgwire`, executing them one by one, updating its transaction state (did a
+new transaction just begin or an old transaction just end? did we encounter an
+error which forces us to abort the current transaction?) and notifying
+[ClientComm](https://github.com/cockroachdb/cockroach/blob/708df8bca077276b9161d68486beae26e77e4377/pkg/sql/conn_io.go#L574)
+about any results or errors.
 
 ### Parsing
 
-The first thing the `Executor` does is [parse the
-statements](https://github.com/cockroachdb/cockroach/blob/677f6f18b63355cb2d040b251af202fe6505128f/pkg/sql/executor.go#L495);
-parsing uses a LALR parser generated by `go-yacc` from a [Yacc-like grammar
-file](https://github.com/cockroachdb/cockroach/blob/677f6f18b63355cb2d040b251af202fe6505128f/pkg/sql/parser/sql.y),
+Parsing is
+[performed](https://github.com/cockroachdb/cockroach/blob/708df8bca077276b9161d68486beae26e77e4377/pkg/sql/pgwire/conn.go#L685),
+by `pgwire.conn` and uses a LALR parser generated by `go-yacc` from a
+[Yacc-like grammar file](https://github.com/cockroachdb/cockroach/blob/708df8bca077276b9161d68486beae26e77e4377/pkg/sql/parser/sql.y),
 originally copied from Postgres and stripped down, and then gradually
 grown organically with ever-more SQL support. The process of parsing
 transforms a `string` into an array of ASTs (Abstract Syntax Trees),
 one for each statement. The AST nodes are structs defined in the
-`sql/parser` package, generally of two types - statements and
+`sql/sem/tree` package, generally of two types - statements and
 expressions. Expressions implement a common interface useful for
 applying tree transformations. These ASTs will later be transformed by
-the `planner` into an execution plan.
+the cost-based optimizer into an execution plan.
 
 ### Statement Execution
 
-With a list of statements in hand, `Executor.execRequest()` goes
-through them in order and executes one transaction's worth of
-statements at a time (i.e. groups of statements between a `BEGIN` and
-`COMMIT/ROLLBACK` statements, or single statements executed outside of
-a transaction). If the session had an open transaction after execution
-of the previous batch, we continue consuming statements until a
-`COMMIT/ROLLBACK`. This "consuming of statements" is done by the call
-to
-[`runTxnAttempt`](https://github.com/cockroachdb/cockroach/blob/677f6f18b63355cb2d040b251af202fe6505128f/pkg/sql/executor.go#L587);
-this function returns after executing statements until the
-`COMMIT/ROLLBACK` has been encountered.
+`connExecutor.execCmd` reads the current command from the `stmtBuf` and 
+executes it. If the session had an open transaction after execution of the 
+previous command, we continue executing statements until a `COMMIT/ROLLBACK`. 
+This "consuming of statements" is done by the call to
+[`connExecutor.execStmt()`](https://github.com/cockroachdb/cockroach/blob/48bcbf1f26919fbf3fd84c56456e1931bb4f2341/pkg/sql/conn_executor_exec.go#L66).
 
 There is an impedance mismatch that has to be explained here, around
 the interfacing of the SQL `Executor/session` code, which is
@@ -126,30 +126,25 @@ within the scope of SQL transactions) and CockroachDB's Key/Value (KV)
 interface, which is request oriented with transactions explicitly
 attached to every request. The most interesting interface for the KV
 layer of the database is the
-[`Txn.Exec()`](https://github.com/cockroachdb/cockroach/blob/33c18ad1bcdb37ed6ed428b7527148977a8c566a/pkg/internal/client/txn.go#L465)
-method. `Txn` lives in the `internal/client` package, which contains
-the KV client interface (the "client" and the server in this context
-are both internal to CockroachDB, although we used to expose the KV
-interface externally in the past and it's not out of the question that
-we'll do it again in the future). `Txn` represents a KV transaction;
+[`Txn.exec()`](https://github.com/cockroachdb/cockroach/blob/5bbb182ddd59524c73b05ec52cc7013e0c9cf3a2/pkg/kv/txn.go#L815)
+method. `Txn` lives in the `/pkg/kv` package, which contains 
+the KV client interface. `Txn` represents a KV transaction;
 there's generally one associated with the SQL session, reused between
 client ping-pongs.
 
-The `Txn.Exec` interface takes a callback and some execution options
-and, based on those options, executes the callback possibly multiple
-times and commits the transaction afterwards. If allowed by the
-options, the callback might be called multiple times, to deal with
-retries of transactions that are [sometimes
-necessary](https://www.cockroachlabs.com/docs/stable/transactions.html#transaction-retries)
-in CockroachDB (usually because of data contention). The SQL
-`Executor` might or might not want to let the KV client perform such
-retries automatically.
+The `Txn.exec` interface executes a given closure function in the context of a
+distributed transaction. The transaction is automatically aborted if retryable 
+returns any error aside from recoverable internal errors, in which case the 
+closure is retried. Retries are 
+[sometimes necessary](https://www.cockroachlabs.com/docs/stable/transactions.html#transaction-retries)
+in CockroachDB (usually because of data contention). In case no error occurred 
+the transaction is automatically committed.
 
 To hint at the complications: a single SQL
 statement executed outside of a SQL transaction (i.e. an "implicit
 transaction") can be safely retried. However, a SQL transaction
 spanning multiple client requests will have different statements
-executed in different callbacks passed to `Txn.Exec()`; as such, it is
+executed in different callbacks passed to `Txn.exec()`; as such, it is
 not sufficient to retry one of these callbacks - we have to retry all
 the statements in the transaction, and generally some of these
 statements might be conditional on the client's logic and thus cannot
@@ -157,82 +152,66 @@ be retried verbatim (i.e. different results for a `SELECT` might
 trigger different subsequent statements). In this case, we bubble up a
 retryable error to the client; more details about this can be read in
 our [transaction
-documentation](https://www.cockroachlabs.com/docs/stable/transactions.html#client-side-intervention). This
-complexity is captured in
-[`Executor.execRequest()`](https://github.com/cockroachdb/cockroach/blob/33c18ad1bcdb37ed6ed428b7527148977a8c566a/pkg/sql/executor.go#L495),
-which has logic for setting the different execution options and
-contains a [suitable
-callback](https://github.com/cockroachdb/cockroach/blob/33c18ad1bcdb37ed6ed428b7527148977a8c566a/pkg/sql/executor.go#L604)
-[passed to
-`Txn.Exec()`](https://github.com/cockroachdb/cockroach/blob/33c18ad1bcdb37ed6ed428b7527148977a8c566a/pkg/sql/executor.go#L643);
-this callback will call
-[`runTxnAttempt()`](https://github.com/cockroachdb/cockroach/blob/33c18ad1bcdb37ed6ed428b7527148977a8c566a/pkg/sql/executor.go#L621). The
-statement execution code path continues inside the callback, but it is
-worth noting that, from this moment on, we have interfaced with the
-(client of the) KV layer and everything below is executing in the
-context of a KV transaction.
+documentation](https://www.cockroachlabs.com/docs/stable/transactions.html#client-side-intervention).
+
+`connExecutor` serves as a coordinator between different components during a
+SQL statement execution. It [builds a logical plan](https://github.com/cockroachdb/cockroach/blob/738e60ad1a50ebfc13fb61490c71673c92d67b90/pkg/sql/conn_executor_exec.go#L815)
+for a statement, and then converts it to a physical plan and 
+[passes it to a SQL engine for execution](https://github.com/cockroachdb/cockroach/blob/738e60ad1a50ebfc13fb61490c71673c92d67b90/pkg/sql/conn_executor_exec.go#L907). 
 
 ### Building execution plans
 
 Now that we have figured out what (KV) transaction we're running inside
 of, we are concerned with executing SQL statements one at a
-time. `runTxnAttempt()` has a few layers below it dealing with the
-various states a SQL transaction can be in
-([open](https://github.com/cockroachdb/cockroach/blob/33c18ad1bcdb37ed6ed428b7527148977a8c566a/pkg/sql/executor.go#L966s)
+time. [`execStmt()`](https://github.com/cockroachdb/cockroach/blob/9969862335cf501c1aa67a4aaf018ad5dc8e85e8/pkg/sql/conn_executor_exec.go#L66)
+has a few layers below it dealing with the various states a SQL transaction can 
+be in
+([open](https://github.com/cockroachdb/cockroach/blob/9969862335cf501c1aa67a4aaf018ad5dc8e85e8/pkg/sql/conn_executor_exec.go#L241)
 /
-[aborted](https://github.com/cockroachdb/cockroach/blob/33c18ad1bcdb37ed6ed428b7527148977a8c566a/pkg/sql/executor.go#L887)
-/ [waiting for a user
-retry](https://github.com/cockroachdb/cockroach/blob/33c18ad1bcdb37ed6ed428b7527148977a8c566a/pkg/sql/executor.go#L944),
-etc.), but the interesting one is
-[execStmt](https://github.com/cockroachdb/cockroach/blob/677f6f18b63355cb2d040b251af202fe6505128f/pkg/sql/executor.go#L1258). This
-guy [creates an "execution
-plan"](https://github.com/cockroachdb/cockroach/blob/677f6f18b63355cb2d040b251af202fe6505128f/pkg/sql/executor.go#L1261)
+[aborted](https://github.com/cockroachdb/cockroach/blob/9969862335cf501c1aa67a4aaf018ad5dc8e85e8/pkg/sql/conn_executor_exec.go#L1160)
+/ [waiting for a user retry](https://github.com/cockroachdb/cockroach/blob/9969862335cf501c1aa67a4aaf018ad5dc8e85e8/pkg/sql/conn_executor_exec.go#L1214),
+etc.). `execStmt()` [creates an "execution plan"](https://github.com/cockroachdb/cockroach/blob/9969862335cf501c1aa67a4aaf018ad5dc8e85e8/pkg/sql/conn_executor_exec.go#L931)
 for a statement and runs it.
 
 An execution plan in CockroachDB is a tree of
 [`planNode`](https://github.com/cockroachdb/cockroach/blob/33c18ad/pkg/sql/plan.go#L72)
 nodes, similar in spirit to the AST but, this time, containing
 semantic information and also runtime state. This tree is built by
-[`planner.makePlan()`](https://github.com/cockroachdb/cockroach/blob/33c18ad1bcdb37ed6ed428b7527148977a8c566a/pkg/sql/plan.go#L199),
-which takes a parsed statement and returns the root of the `planNode`
-tree after having performed all the semantic analysis and various
-transformations. The nodes in this tree are actually "executable"
-(they have `Start()` and `Next()` methods), and each one will consume
+[`planner.makeOptimizerPlan()`](https://github.com/cockroachdb/cockroach/blob/9969862335cf501c1aa67a4aaf018ad5dc8e85e8/pkg/sql/plan_opt.go#L188),
+which builds the `planNode` tree from a parsed statement after having 
+performed all the semantic analysis and various transformations. 
+The nodes in this tree are actually "executable"
+(they have `startExec()` and `Next()` methods), and each one will consume
 data produced by its children (e.g. a `JoinNode` has [`left and
 right`](https://github.com/cockroachdb/cockroach/blob/33c18ad1bcdb37ed6ed428b7527148977a8c566a/pkg/sql/join.go#L125)
 children whose data it consumes).
 
-Currently building the execution plan, performing semantic analysis
-and applying various transformations is a pretty ad-hoc process, but
-we are working on replacing the code with a more structured process and
-separating the IR (Intermediate Representation) used for analysis and
-transforms from the runtime structures (see this WIP
-RFC)[https://github.com/cockroachdb/cockroach/pull/10055/files#diff-542aa8b21b245d1144c920577333ceed].
+SQL query planning and optimizations are described in detail in the 
+documentation for the [`opt` package](https://github.com/cockroachdb/cockroach/blob/9969862335cf501c1aa67a4aaf018ad5dc8e85e8/pkg/sql/opt/doc.go). 
 
-In the meantime, the `planner` [looks at the type of the
-statement](https://github.com/cockroachdb/cockroach/blob/33c18ad1bcdb37ed6ed428b7527148977a8c566a/pkg/sql/plan.go#L248)
-at the top of the AST and, for each statement type, invokes a specific
-method that builds the execution plan. For example, the tree for a
-`SELECT` statement is produced by
-[`planner.SelectClause()`](https://github.com/cockroachdb/cockroach/blob/33c18ad1bcdb37ed6ed428b7527148977a8c566a/pkg/sql/select.go#L257). Notice
-how different aspects of a `SELECT` statement are handled there: a
-`scanNode` is created
-(`renderNode.initFrom()`->...->
-[`planner.Scan()`](https://github.com/cockroachdb/cockroach/blob/33c18ad1bcdb37ed6ed428b7527148977a8c566a/pkg/sql/data_source.go#L441))
-to scan a table, a `WHERE` clause is transformed into an expression
-and assigned to a
-`filterNode`,
-an `ORDER BY` clause is [turned into a
-`sortNode`](https://github.com/cockroachdb/cockroach/blob/33c18ad1bcdb37ed6ed428b7527148977a8c566a/pkg/sql/select.go#L296),
+The plan `optbuilder` [looks at the type of the
+statement](https://github.com/cockroachdb/cockroach/blob/9969862335cf501c1aa67a4aaf018ad5dc8e85e8/pkg/sql/opt/optbuilder/builder.go#L248)
+and, for each statement type, invokes a specific method that builds a memo 
+group (memo is a data structure for efficiently storing a forest of query 
+plans). For example, a memo group for a `SELECT` statement is produced by 
+[`optbuilder.buildSelectClause()`](https://github.com/cockroachdb/cockroach/blob/9969862335cf501c1aa67a4aaf018ad5dc8e85e8/pkg/sql/opt/optbuilder/select.go#L1003). 
+Notice how different aspects of a `SELECT` statement are handled:
+a memo group for a ScanOp expression is created
+(`optbuilder.buildSelectClause()`->...->
+[`optbuilder.buildScan()`](https://github.com/cockroachdb/cockroach/blob/9969862335cf501c1aa67a4aaf018ad5dc8e85e8/pkg/sql/opt/optbuilder/select.go#L114))
+to scan a table, a `WHERE` clause is turned into an [`memo.FilterExpr`](https://github.com/cockroachdb/cockroach/blob/9969862335cf501c1aa67a4aaf018ad5dc8e85e8/pkg/sql/opt/optbuilder/select.go#L1126),
+an `ORDER BY` clause is [ordering physical property](https://github.com/cockroachdb/cockroach/blob/9969862335cf501c1aa67a4aaf018ad5dc8e85e8/pkg/sql/opt/optbuilder/orderby.go#L65),
 etc. In the end, a
-[`selectTopNode`](https://github.com/cockroachdb/cockroach/blob/33c18ad1bcdb37ed6ed428b7527148977a8c566a/pkg/sql/select.go#L320)
-is produced, which in fact is a tree of a `groupNode`, a `windowNode`,
-a `sortNode`, a `distinctNode` and a `renderNode` wrapping a
-`scanNode` acting as an original data source).
+[`memo.RelExpr`](https://github.com/cockroachdb/cockroach/blob/9969862335cf501c1aa67a4aaf018ad5dc8e85e8/pkg/sql/opt/optbuilder/with.go#L34)
+is produced, which contains all the plans from the above.
 
-Finally, the execution plan is simplified and optimized somewhat; this
-includes removing the `selectTopNode` wrappers and eliding all no-op
-intermediate nodes.
+Finally, the execution plan is simplified, [optimized](https://github.com/cockroachdb/cockroach/blob/5ee1f52f0eef1eeceddde16aad5002dc31ca08cb/pkg/sql/opt/xform/optimizer.go#L198), and
+a physical plan is built by [`execbuilder.Build()`](https://github.com/cockroachdb/cockroach/blob/ac0f819feeee435af2545034bbd40113b47d5b86/pkg/sql/opt/exec/execbuilder/builder.go#L134).
+
+For example, for the Scan operation above a [`scanNode` will be created](https://github.com/cockroachdb/cockroach/blob/d112e2651b8d29a08a7b95106079c27652158d5f/pkg/sql/opt_exec_factory.go#L79).
+This method belongs to the `Factory` interface generated by [`execFactoryGen.genExecFactory()`](https://github.com/cockroachdb/cockroach/blob/d112e2651b8d29a08a7b95106079c27652158d5f/pkg/sql/opt/optgen/cmd/optgen/exec_factory_gen.go#L47), and
+implemented by [`execFactory`](https://github.com/cockroachdb/cockroach/blob/d112e2651b8d29a08a7b95106079c27652158d5f/pkg/sql/opt_exec_factory.go#L46) and
+[`distSQLSpecExecFactory`](https://github.com/cockroachdb/cockroach/blob/d112e2651b8d29a08a7b95106079c27652158d5f/pkg/sql/distsql_spec_exec_factory.go#L33).
 
 To make this notion of the execution plan more concrete, consider one
 actually "rendered" by the `EXPLAIN` statement:
@@ -250,44 +229,70 @@ root@:26257> insert into customers values
 ('Apple', '1 Infinite Loop', 'CA'),
 ('IBM', '1 New Orchard Road ', 'NY');
 
-root@:26257> EXPLAIN(EXPRS,NOEXPAND,NOOPTIMIZE,METADATA) SELECT * FROM customers WHERE address like '%Infinite%' ORDER BY state;
-+-------+--------+----------+---------------------------+------------------------+----------+
-| Level |  Type  |  Field   |        Description        |        Columns         | Ordering |
-+-------+--------+----------+---------------------------+------------------------+----------+
-|     0 | select |          |                           | (name, address, state) | +state   |
-|     1 | nosort |          |                           | (name, address, state) | +state   |
-|     1 |        | order    | +@3                       |                        |          |
-|     1 | render |          |                           | (name, address, state) |          |
-|     1 |        | render 0 | name                      |                        |          |
-|     1 |        | render 1 | address                   |                        |          |
-|     1 |        | render 2 | state                     |                        |          |
-|     2 | filter |          |                           | (name, address, state) |          |
-|     2 |        | filter   | address LIKE '%Infinite%' |                        |          |
-|     3 | scan   |          |                           | (name, address, state) |          |
-|     3 |        | table    | customers@primary         |                        |          |
-+-------+--------+----------+---------------------------+------------------------+----------+
+root@:26257> EXPLAIN(VERBOSE) SELECT * FROM customers WHERE address like '%Infinite%' ORDER BY state;
+info
+---------------------------------------------
+  distribution: full
+  vectorized: true
+
+  • sort
+  │ columns: (name, address, state)
+  │ ordering: +state
+  │ estimated row count: 0
+  │ order: +state
+  │
+  └── • filter
+      │ columns: (name, address, state)
+      │ estimated row count: 0
+      │ filter: address LIKE '%Infinite%'
+      │
+      └── • scan
+            columns: (name, address, state)
+            estimated row count: 1
+table: customers@primary
+            spans: FULL SCAN
+(19 rows)
 ```
 
 You can see data being produced by a `scanNode`, being filtered by a
-`renderNode` (presented as "render"), and then sorted by a `sortNode`
-(presented as "nosort", because we have turned off order analysis with
-NOEXPAND and the sort node doesn't know yet whether sorting is
-needed), wrapped in a `selectTopNode` (presented as "select").
+`filterNode` (presented as "filter"), and then sorted by a `sortNode`.
 
-With plan simplification turned on, the EXPLAIN output becomes:
+With the parameter to display the query plan generated by the 
+[cost-based optimizer](https://www.cockroachlabs.com/docs/v20.2/cost-based-optimizer) 
+turned on, the EXPLAIN output becomes:
 
 ```
-root@:26257> EXPLAIN (EXPRS,METADATA) SELECT * FROM customers WHERE address LIKE '%Infinite%' ORDER BY state;
-+-------+------+--------+---------------------------+------------------------+--------------+
-| Level | Type | Field  |        Description        |        Columns         |   Ordering   |
-+-------+------+--------+---------------------------+------------------------+--------------+
-|     0 | sort |        |                           | (name, address, state) | +state       |
-|     0 |      | order  | +state                    |                        |              |
-|     1 | scan |        |                           | (name, address, state) | +name,unique |
-|     1 |      | table  | customers@primary         |                        |              |
-|     1 |      | spans  | ALL                       |                        |              |
-|     1 |      | filter | address LIKE '%Infinite%' |                        |              |
-+-------+------+--------+---------------------------+------------------------+--------------+
+root@:26257> EXPLAIN (OPT,VERBOSE) SELECT * FROM customers WHERE address LIKE '%Infinite%' ORDER BY state;
+                                          info
+----------------------------------------------------------------------------------------
+  sort
+   ├── columns: name:1 address:2 state:3
+   ├── stats: [rows=0.333333333, distinct(2)=0.333333333, null(2)=0]
+   ├── cost: 5.12666667
+   ├── key: (1)
+   ├── fd: (1)-->(2,3)
+   ├── ordering: +3
+   ├── prune: (1,3)
+   ├── interesting orderings: (+1) (+3,+1)
+   └── select
+        ├── columns: name:1 address:2 state:3
+        ├── stats: [rows=0.333333333, distinct(2)=0.333333333, null(2)=0]
+        ├── cost: 5.11
+        ├── key: (1)
+        ├── fd: (1)-->(2,3)
+        ├── prune: (1,3)
+        ├── interesting orderings: (+1) (+3,+1)
+        ├── scan customers
+        │    ├── columns: name:1 address:2 state:3
+        │    ├── stats: [rows=1, distinct(1)=1, null(1)=0, distinct(2)=1, null(2)=0]
+        │    ├── cost: 5.08
+        │    ├── key: (1)
+        │    ├── fd: (1)-->(2,3)
+        │    ├── prune: (1-3)
+        │    └── interesting orderings: (+1) (+3,+1)
+        └── filters
+             └── address:2 LIKE '%Infinite%' [outer=(2), constraints=(/2: (/NULL - ])]
+(27 rows)
 ```
 
 #### Expressions

@@ -1,16 +1,12 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package cli
 
@@ -26,6 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sqlmigrations"
+	"github.com/cockroachdb/errors/oserror"
 	"github.com/spf13/cobra"
 	"github.com/spf13/cobra/doc"
 )
@@ -59,7 +56,7 @@ func runGenManCmd(cmd *cobra.Command, args []string) error {
 	}
 
 	if _, err := os.Stat(manPath); err != nil {
-		if os.IsNotExist(err) {
+		if oserror.IsNotExist(err) {
 			if err := os.MkdirAll(manPath, 0755); err != nil {
 				return err
 			}
@@ -122,7 +119,7 @@ func runGenAutocompleteCmd(cmd *cobra.Command, args []string) error {
 		err = cmd.Root().GenZshCompletionFile(autoCompletePath)
 	}
 	if err != nil {
-		return nil
+		return err
 	}
 
 	fmt.Printf("Generated %s completion file: %s\n", shell, autoCompletePath)
@@ -150,10 +147,10 @@ The resulting key file will be 32 bytes (random key ID) + key_size in bytes.
 		}
 
 		// 32 bytes are reserved for key ID.
-		keySize := aesSize/8 + 32
-		b := make([]byte, keySize)
+		kSize := aesSize/8 + 32
+		b := make([]byte, kSize)
 		if _, err := rand.Read(b); err != nil {
-			return fmt.Errorf("failed to create key with size %d bytes", keySize)
+			return fmt.Errorf("failed to create key with size %d bytes", kSize)
 		}
 
 		// Write key to the file with owner read/write permission.
@@ -183,8 +180,11 @@ The resulting key file will be 32 bytes (random key ID) + key_size in bytes.
 	},
 }
 
+var includeReservedSettings bool
+var excludeSystemSettings bool
+
 var genSettingsListCmd = &cobra.Command{
-	Use:   "settings-list <output-dir>",
+	Use:   "settings-list",
 	Short: "output a list of available cluster settings",
 	Long: `
 Output the list of cluster settings known to this binary.
@@ -203,17 +203,32 @@ Output the list of cluster settings known to this binary.
 
 		var rows [][]string
 		for _, name := range settings.Keys() {
-			setting, ok := settings.Lookup(name)
+			setting, ok := settings.Lookup(name, settings.LookupForLocalAccess)
 			if !ok {
 				panic(fmt.Sprintf("could not find setting %q", name))
 			}
+
+			if excludeSystemSettings && setting.SystemOnly() {
+				continue
+			}
+
+			if setting.Visibility() != settings.Public {
+				// We don't document non-public settings at this time.
+				continue
+			}
+
 			typ, ok := settings.ReadableTypes[setting.Typ()]
 			if !ok {
 				panic(fmt.Sprintf("unknown setting type %q", setting.Typ()))
 			}
-			defaultVal := setting.String(&s.SV)
-			if override, ok := sqlmigrations.SettingsDefaultOverrides[name]; ok {
-				defaultVal = override
+			var defaultVal string
+			if sm, ok := setting.(*settings.VersionSetting); ok {
+				defaultVal = sm.SettingsListDefault()
+			} else {
+				defaultVal = setting.String(&s.SV)
+				if override, ok := sqlmigrations.SettingsDefaultOverrides[name]; ok {
+					defaultVal = override
+				}
 			}
 			row := []string{wrapCode(name), typ, wrapCode(defaultVal), setting.Description()}
 			rows = append(rows, row)
@@ -259,11 +274,15 @@ func init() {
 		"path to generated autocomplete file")
 	genHAProxyCmd.PersistentFlags().StringVar(&haProxyPath, "out", "haproxy.cfg",
 		"path to generated haproxy configuration file")
-	VarFlag(genHAProxyCmd.Flags(), &haProxyLocality, cliflags.Locality)
+	varFlag(genHAProxyCmd.Flags(), &haProxyLocality, cliflags.Locality)
 	genEncryptionKeyCmd.PersistentFlags().IntVarP(&aesSize, "size", "s", 128,
 		"AES key size for encryption at rest (one of: 128, 192, 256)")
 	genEncryptionKeyCmd.PersistentFlags().BoolVar(&overwriteKey, "overwrite", false,
 		"Overwrite key if it exists")
+	genSettingsListCmd.PersistentFlags().BoolVar(&includeReservedSettings, "include-reserved", false,
+		"include undocumented 'reserved' settings")
+	genSettingsListCmd.PersistentFlags().BoolVar(&excludeSystemSettings, "without-system-only", false,
+		"do not list settings only applicable to system tenant")
 
 	genCmd.AddCommand(genCmds...)
 }

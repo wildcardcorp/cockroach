@@ -1,6 +1,7 @@
 CREATE TABLE everything (
   i     INT4 PRIMARY KEY,
 
+  ex    INT4 DEFAULT 4:::INT4 * 4:::INT4 + 4:::INT4,
   c     CHAR(10) NOT NULL,
   s     VARCHAR(100) NULL DEFAULT e'this is s\'s default value':::STRING,
   tx    TEXT,
@@ -10,7 +11,7 @@ CREATE TABLE everything (
   vbin  BYTEA,
   bl    BLOB,
 
-  dt    TIMESTAMPTZ NOT NULL DEFAULT '2000-01-01 00:00:00+00:00':::TIMESTAMPTZ,
+  dt    TIMESTAMPTZ NOT NULL DEFAULT '2000-01-01 00:00:00':::TIMESTAMPTZ,
   d     DATE,
   ts    TIMESTAMPTZ NOT NULL DEFAULT current_timestamp(),
   t     TIME,

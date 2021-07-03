@@ -1,16 +1,12 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package ts_test
 
@@ -20,38 +16,37 @@ import (
 	"io"
 	"reflect"
 	"sort"
-	"strings"
 	"testing"
 	"unsafe"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/server"
-	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/ts"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
-	"github.com/gogo/protobuf/proto"
+	"github.com/cockroachdb/errors"
 	"github.com/kr/pretty"
-	"github.com/pkg/errors"
 )
 
 func TestServerQuery(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{
 		Knobs: base.TestingKnobs{
-			Store: &storage.StoreTestingKnobs{
+			Store: &kvserver.StoreTestingKnobs{
 				DisableTimeSeriesMaintenanceQueue: true,
 			},
 		},
 	})
-	defer s.Stopper().Stop(context.TODO())
+	defer s.Stopper().Stop(context.Background())
 	tsrv := s.(*server.TestServer)
 
 	// Populate data directly.
 	tsdb := tsrv.TsDB()
-	if err := tsdb.StoreData(context.TODO(), ts.Resolution10s, []tspb.TimeSeriesData{
+	if err := tsdb.StoreData(context.Background(), ts.Resolution10s, []tspb.TimeSeriesData{
 		{
 			Name:   "test.metric",
 			Source: "source1",
@@ -177,7 +172,8 @@ func TestServerQuery(t *testing.T) {
 		},
 	}
 
-	conn, err := tsrv.RPCContext().GRPCDial(tsrv.Cfg.Addr).Connect(context.Background())
+	conn, err := tsrv.RPCContext().GRPCDialNode(tsrv.Cfg.Addr, tsrv.NodeID(),
+		rpc.DefaultClass).Connect(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +202,7 @@ func TestServerQuery(t *testing.T) {
 	for _, r := range response.Results {
 		sort.Strings(r.Sources)
 	}
-	if !proto.Equal(response, expectedResult) {
+	if !response.Equal(expectedResult) {
 		t.Fatalf("actual response \n%v\n did not match expected response \n%v",
 			response, expectedResult)
 	}
@@ -250,7 +246,7 @@ func TestServerQuery(t *testing.T) {
 	for _, r := range response.Results {
 		sort.Strings(r.Sources)
 	}
-	if !proto.Equal(response, expectedResult) {
+	if !response.Equal(expectedResult) {
 		t.Fatalf("actual response \n%v\n did not match expected response \n%v",
 			response, expectedResult)
 	}
@@ -264,7 +260,7 @@ func TestServerQueryStarvation(t *testing.T) {
 	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{
 		TimeSeriesQueryWorkerMax: workerCount,
 	})
-	defer s.Stopper().Stop(context.TODO())
+	defer s.Stopper().Stop(context.Background())
 	tsrv := s.(*server.TestServer)
 
 	seriesCount := workerCount * 2
@@ -272,7 +268,8 @@ func TestServerQueryStarvation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	conn, err := tsrv.RPCContext().GRPCDial(tsrv.Cfg.Addr).Connect(context.Background())
+	conn, err := tsrv.RPCContext().GRPCDialNode(tsrv.Cfg.Addr, tsrv.NodeID(),
+		rpc.DefaultClass).Connect(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,14 +317,15 @@ func TestServerQueryMemoryManagement(t *testing.T) {
 		TimeSeriesQueryWorkerMax:    workerCount,
 		TimeSeriesQueryMemoryBudget: budget,
 	})
-	defer s.Stopper().Stop(context.TODO())
+	defer s.Stopper().Stop(context.Background())
 	tsrv := s.(*server.TestServer)
 
 	if err := populateSeries(seriesCount, sourceCount, valueCount, tsrv.TsDB()); err != nil {
 		t.Fatal(err)
 	}
 
-	conn, err := tsrv.RPCContext().GRPCDial(tsrv.Cfg.Addr).Connect(context.Background())
+	conn, err := tsrv.RPCContext().GRPCDialNode(tsrv.Cfg.Addr, tsrv.NodeID(),
+		rpc.DefaultClass).Connect(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -354,33 +352,50 @@ func TestServerDump(t *testing.T) {
 
 	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{
 		Knobs: base.TestingKnobs{
-			Store: &storage.StoreTestingKnobs{
+			Store: &kvserver.StoreTestingKnobs{
 				DisableTimeSeriesMaintenanceQueue: true,
 			},
 		},
 	})
-	defer s.Stopper().Stop(context.TODO())
+	defer s.Stopper().Stop(context.Background())
 	tsrv := s.(*server.TestServer)
 
 	seriesCount := 10
 	sourceCount := 5
 	// Number of slabs (hours) of data we want to generate
 	slabCount := 5
-	// Generated datapoints every 100 seconds, so compute how many we want to
-	// generate data across the target number of hours.
-	valueCount := int(ts.Resolution10s.SlabDuration()/(100*1e9)) * slabCount
+	// Number of datapoints to generate every hour. Generated datapoints every
+	// 100 seconds, so compute how many we want to generate data across one hour.
+	numPointsEachHour := int(ts.Resolution10s.SlabDuration() / (100 * 1e9))
+	// Number of total datapoints.
+	valueCount := numPointsEachHour * slabCount
+	// We'll dump [startVal, endVal) below. To simplify the test, pick them
+	// according to a slab boundary.
+	startSlab, endSlab := 2, 4
+	startVal := numPointsEachHour * startSlab
+	endVal := numPointsEachHour * endSlab
 
 	if err := populateSeries(seriesCount, sourceCount, valueCount, tsrv.TsDB()); err != nil {
 		t.Fatal(err)
 	}
 
-	conn, err := tsrv.RPCContext().GRPCDial(tsrv.Cfg.Addr).Connect(context.Background())
+	names := make([]string, 0, seriesCount)
+	for series := 0; series < seriesCount; series++ {
+		names = append(names, seriesName(series))
+	}
+
+	conn, err := tsrv.RPCContext().GRPCDialNode(tsrv.Cfg.Addr, tsrv.NodeID(),
+		rpc.DefaultClass).Connect(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	client := tspb.NewTimeSeriesClient(conn)
 
-	dumpClient, err := client.Dump(context.TODO(), nil)
+	dumpClient, err := client.Dump(context.Background(), &tspb.DumpRequest{
+		Names:      names,
+		StartNanos: datapointTimestampNanos(startVal),
+		EndNanos:   datapointTimestampNanos(endVal),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,12 +410,6 @@ func TestServerDump(t *testing.T) {
 		}
 		if err != nil {
 			t.Fatal(err)
-		}
-		// The dump will include all of the real time series metrics recorded by the
-		// server. Filter out everything other than the metrics we are creating
-		// for this test.
-		if !strings.HasPrefix(msg.Name, "metric.") {
-			continue
 		}
 		sourceMap, ok := resultMap[msg.Name]
 		if !ok {
@@ -425,12 +434,12 @@ func TestServerDump(t *testing.T) {
 			sourceMap[sourceName(source)] = tspb.TimeSeriesData{
 				Name:       seriesName(series),
 				Source:     sourceName(source),
-				Datapoints: generateTimeSeriesDatapoints(valueCount),
+				Datapoints: generateTimeSeriesDatapoints(startVal, endVal),
 			}
 		}
 	}
 
-	if a, e := totalMsgCount, seriesCount*sourceCount*slabCount; a != e {
+	if a, e := totalMsgCount, seriesCount*sourceCount*(endSlab-startSlab); a != e {
 		t.Fatalf("dump returned %d messages, expected %d", a, e)
 	}
 	if a, e := resultMap, expectedMap; !reflect.DeepEqual(a, e) {
@@ -442,7 +451,7 @@ func TestServerDump(t *testing.T) {
 
 func BenchmarkServerQuery(b *testing.B) {
 	s, _, _ := serverutils.StartServer(b, base.TestServerArgs{})
-	defer s.Stopper().Stop(context.TODO())
+	defer s.Stopper().Stop(context.Background())
 	tsrv := s.(*server.TestServer)
 
 	// Populate data for large number of time series.
@@ -452,7 +461,8 @@ func BenchmarkServerQuery(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	conn, err := tsrv.RPCContext().GRPCDial(tsrv.Cfg.Addr).Connect(context.Background())
+	conn, err := tsrv.RPCContext().GRPCDialNode(tsrv.Cfg.Addr, tsrv.NodeID(),
+		rpc.DefaultClass).Connect(context.Background())
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -485,13 +495,20 @@ func sourceName(sourceNum int) string {
 	return fmt.Sprintf("source.%d", sourceNum)
 }
 
-func generateTimeSeriesDatapoints(valueCount int) []tspb.TimeSeriesDatapoint {
-	result := make([]tspb.TimeSeriesDatapoint, 0, valueCount)
-	var i int64
-	for i = 0; i < int64(valueCount); i++ {
+func datapointTimestampNanos(val int) int64 {
+	return int64(val * 100 * 1e9)
+}
+
+func datapointValue(val int) float64 {
+	return float64(val * 100)
+}
+
+func generateTimeSeriesDatapoints(startValue, endValue int) []tspb.TimeSeriesDatapoint {
+	result := make([]tspb.TimeSeriesDatapoint, 0, endValue-startValue)
+	for i := startValue; i < endValue; i++ {
 		result = append(result, tspb.TimeSeriesDatapoint{
-			TimestampNanos: i * 100 * 1e9,
-			Value:          float64(i * 100),
+			TimestampNanos: datapointTimestampNanos(i),
+			Value:          datapointValue(i),
 		})
 	}
 	return result
@@ -500,11 +517,11 @@ func generateTimeSeriesDatapoints(valueCount int) []tspb.TimeSeriesDatapoint {
 func populateSeries(seriesCount, sourceCount, valueCount int, tsdb *ts.DB) error {
 	for series := 0; series < seriesCount; series++ {
 		for source := 0; source < sourceCount; source++ {
-			if err := tsdb.StoreData(context.TODO(), ts.Resolution10s, []tspb.TimeSeriesData{
+			if err := tsdb.StoreData(context.Background(), ts.Resolution10s, []tspb.TimeSeriesData{
 				{
 					Name:       seriesName(series),
 					Source:     sourceName(source),
-					Datapoints: generateTimeSeriesDatapoints(valueCount),
+					Datapoints: generateTimeSeriesDatapoints(0 /* startValue */, valueCount),
 				},
 			}); err != nil {
 				return errors.Errorf(

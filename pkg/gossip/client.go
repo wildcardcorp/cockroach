@@ -1,16 +1,12 @@
 // Copyright 2014 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package gossip
 
@@ -29,7 +25,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/pkg/errors"
+	"github.com/cockroachdb/errors"
 )
 
 // client is a client-side RPC connection to a gossip peer node.
@@ -59,9 +55,9 @@ func extractKeys(delta map[string]*Info) string {
 // newClient creates and returns a client struct.
 func newClient(ambient log.AmbientContext, addr net.Addr, nodeMetrics Metrics) *client {
 	return &client{
-		AmbientContext: ambient,
-		createdAt:      timeutil.Now(),
-		addr:           addr,
+		AmbientContext:        ambient,
+		createdAt:             timeutil.Now(),
+		addr:                  addr,
 		remoteHighWaterStamps: map[roachpb.NodeID]int64{},
 		closer:                make(chan struct{}),
 		clientMetrics:         makeMetrics(),
@@ -85,7 +81,7 @@ func (c *client) startLocked(
 	g.outgoing.addPlaceholder()
 
 	ctx, cancel := context.WithCancel(c.AnnotateCtx(context.Background()))
-	stopper.RunWorker(ctx, func(ctx context.Context) {
+	if err := stopper.RunAsyncTask(ctx, "gossip-client", func(ctx context.Context) {
 		var wg sync.WaitGroup
 		defer func() {
 			// This closes the outgoing stream, causing any attempt to send or
@@ -109,7 +105,7 @@ func (c *client) startLocked(
 			// asynchronous from the caller's perspective, so the only effect of
 			// `WithBlock` here is blocking shutdown - at the time of this writing,
 			// that ends ups up making `kv` tests take twice as long.
-			conn, err := rpcCtx.GRPCDial(c.addr.String()).Connect(ctx)
+			conn, err := rpcCtx.GRPCUnvalidatedDial(c.addr.String()).Connect(ctx)
 			if err != nil {
 				return err
 			}
@@ -137,7 +133,9 @@ func (c *client) startLocked(
 				g.mu.RUnlock()
 			}
 		}
-	})
+	}); err != nil {
+		disconnected <- c
+	}
 }
 
 // close stops the client gossip loop and returns immediately.
@@ -315,7 +313,7 @@ func (c *client) gossip(
 	// This wait group is used to allow the caller to wait until gossip
 	// processing is terminated.
 	wg.Add(1)
-	stopper.RunWorker(ctx, func(ctx context.Context) {
+	if err := stopper.RunAsyncTask(ctx, "client-gossip", func(ctx context.Context) {
 		defer wg.Done()
 
 		errCh <- func() error {
@@ -339,7 +337,10 @@ func (c *client) gossip(
 				}
 			}
 		}()
-	})
+	}); err != nil {
+		wg.Done()
+		return err
+	}
 
 	// We attempt to defer registration of the callback until we've heard a
 	// response from the remote node which will contain the remote's high water
@@ -370,7 +371,7 @@ func (c *client) gossip(
 		select {
 		case <-c.closer:
 			return nil
-		case <-stopper.ShouldStop():
+		case <-stopper.ShouldQuiesce():
 			return nil
 		case err := <-errCh:
 			return err

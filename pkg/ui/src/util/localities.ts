@@ -1,16 +1,12 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 import _ from "lodash";
 
@@ -67,7 +63,10 @@ export function getChildLocalities(locality: LocalityTree): LocalityTree[] {
  * getLocality gets the locality within this tree which corresponds to a set of
  * locality tiers, or null if the locality is not present.
  */
-export function getLocality(localityTree: LocalityTree, tiers: LocalityTier[]): LocalityTree {
+export function getLocality(
+  localityTree: LocalityTree,
+  tiers: LocalityTier[],
+): LocalityTree {
   let result = localityTree;
   for (let i = 0; i < tiers.length; i += 1) {
     const { key, value } = tiers[i];
@@ -117,6 +116,8 @@ export function getLocalityLabel(path: LocalityTier[]): string {
  * allNodesHaveLocality returns true if there exists a node without a locality flag.
  */
 export function allNodesHaveLocality(nodes: INodeStatus[]): boolean {
-  const nodesWithoutLocality = nodes.filter((n) => n.desc.locality.tiers.length === 0);
+  const nodesWithoutLocality = nodes.filter(
+    (n) => n.desc.locality.tiers.length === 0,
+  );
   return nodesWithoutLocality.length === 0;
 }

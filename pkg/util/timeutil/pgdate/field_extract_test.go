@@ -1,25 +1,23 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package pgdate
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/cockroachdb/errors"
 )
 
 func TestExtractRelative(t *testing.T) {
@@ -44,8 +42,14 @@ func TestExtractRelative(t *testing.T) {
 	now := time.Date(2018, 10, 17, 0, 0, 0, 0, time.UTC)
 	for _, tc := range tests {
 		t.Run(tc.s, func(t *testing.T) {
-
-			ts, err := ParseDate(now, ParseModeYMD, tc.s)
+			d, depOnCtx, err := ParseDate(now, ParseModeYMD, tc.s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !depOnCtx {
+				t.Fatalf("relative dates should depend on context")
+			}
+			ts, err := d.ToTime()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -84,10 +88,14 @@ func TestExtractSentinels(t *testing.T) {
 			s:   keywordNow + " tomorrow",
 			err: true,
 		},
+		{
+			s:   "j66001",
+			err: true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.s, func(t *testing.T) {
-			fe := fieldExtract{now: now}
+			fe := fieldExtract{currentTime: now}
 			err := fe.Extract(tc.s)
 			if tc.err {
 				if err == nil {
@@ -102,6 +110,50 @@ func TestExtractSentinels(t *testing.T) {
 				t.Fatal("did not get expected sentinel value")
 			}
 		})
+	}
+}
+
+func TestExtractInvalidJulianDate(t *testing.T) {
+	testCases := []struct {
+		wanted   fieldSet
+		str      string
+		expError string
+	}{
+		// Expect only a time, reject a year.
+		{timeFields, "j69001", `value -4524 for field Year already present or not wanted
+Wanted: [ Hour Minute Second Nanos Meridian TZHour TZMinute TZSecond ]
+Already found in input: [ ]`},
+		// Expect a date, reject when the year is specified twice.
+		{dateFields, "j69001 j69002", `value -4524 for field Year already present or not wanted
+Wanted: [ Era ]
+Already found in input: [ Year Month Day ]`},
+		/// Expect a date+time, reject when the date/month/day is specified twice.
+		{dateTimeFields, "2010-10-10 j69002", `could not parse field: -10
+Wanted: [ Era Nanos Meridian ]
+Already found in input: [ Year Month Day Hour Minute Second TZHour TZMinute TZSecond ]`},
+	}
+
+	// TODO(knz): This would benefit from datadriven testing.
+
+	now := timeutil.Unix(42, 56)
+	for _, tc := range testCases {
+		fe := fieldExtract{
+			currentTime: now,
+			wanted:      tc.wanted,
+		}
+		err := fe.Extract(tc.str)
+		if err == nil {
+			t.Errorf("%+v: expected error, got no error", tc)
+			continue
+		}
+
+		msg := err.Error()
+		msg += "\n" + errors.FlattenDetails(err)
+		if msg != tc.expError {
+			t.Errorf("expected error:\n  %v\ngot:\n  %v",
+				strings.ReplaceAll(tc.expError, "\n", "\n  "),
+				strings.ReplaceAll(msg, "\n", "\n  "))
+		}
 	}
 }
 

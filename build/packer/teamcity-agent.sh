@@ -15,17 +15,11 @@ EOF
 # Avoid saving any Bash history.
 HISTSIZE=0
 
-# At the time of writing we really want 1.11, but that doesn't
-# exist in the PPA yet.
-GOVERS=1.10
-
 # Add third-party APT repositories.
 apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 0EBFCD88
 cat > /etc/apt/sources.list.d/docker.list <<EOF
-deb https://download.docker.com/linux/ubuntu xenial stable
+deb https://download.docker.com/linux/ubuntu bionic stable
 EOF
-apt-add-repository ppa:webupd8team/java
-add-apt-repository ppa:gophers/archive
 # Git 2.7, which ships with Xenial, has a bug where submodule metadata sometimes
 # uses absolute paths instead of relative paths, which means the affected
 # submodules cannot be mounted in Docker containers. Use the latest version of
@@ -33,29 +27,49 @@ add-apt-repository ppa:gophers/archive
 add-apt-repository ppa:git-core/ppa
 apt-get update --yes
 
-# Auto-accept the Oracle Java license agreement.
-debconf-set-selections <<< "oracle-java8-installer shared/accepted-oracle-license-v1-1 select true"
+# Install the sudo version patched for CVE-2021-3156
+apt-get install --yes sudo
 
-# Install the necessary dependencies. Keep this list small!
 apt-get install --yes \
+  curl \
   docker-ce \
   docker-compose \
+  gnome-keyring \
+  gnupg2 \
   git \
-  golang-${GOVERS} \
-  oracle-java8-installer \
+  openjdk-11-jre-headless \
+  pass \
   unzip
 
-# Link Go into the PATH; the PPA installs it into /usr/lib/go-1.x/bin.
-ln -s /usr/lib/go-${GOVERS}/bin/go /usr/bin/go
+curl -fsSL https://dl.google.com/go/go1.15.11.linux-amd64.tar.gz > /tmp/go.tgz
+sha256sum -c - <<EOF
+8825b72d74b14e82b54ba3697813772eb94add3abf70f021b6bdebe193ed01ec /tmp/go.tgz
+EOF
+tar -C /usr/local -zxf /tmp/go.tgz && rm /tmp/go.tgz
 
-# Add a user for the TeamCity agent with Docker rights.
-adduser agent --disabled-password
-adduser agent docker
+# Explicitly symlink the pinned version to /usr/bin.
+for f in `ls /usr/local/go/bin`; do
+    ln -s /usr/local/go/bin/$f /usr/bin
+done
+
+# Installing gnome-keyring prevents the error described in
+# https://github.com/moby/moby/issues/34048
+
+# Add a user for the TeamCity agent if it doesn't exist already.
+id -u agent &>/dev/null 2>&1 || adduser agent --disabled-password
+
+# Give the user for the TeamCity agent Docker rights.
+usermod -a -G docker agent
 
 # Download the TeamCity agent code and install its configuration.
 # N.B.: This must be done as the agent user.
 su - agent <<'EOF'
 set -euxo pipefail
+
+# Set the default branch name for git. (Out of an abundance of caution because
+# I don't know how well TC handles having a different default branch name, stick
+# with "master".)
+git config --global init.defaultBranch master
 
 echo 'export GOPATH="$HOME"/work/.go' >> .profile && source .profile
 
@@ -86,8 +100,15 @@ cd "$repo"
 git submodule update --init --recursive
 for branch in $(git branch --all --list --sort=-committerdate 'origin/release-*' | head -n1) master
 do
+  # Clean out all non-checked-in files. This is because of the check-in of
+  # the generated execgen files. Once we are no longer building 20.1 builds,
+  # the `git clean -dxf` line can be removed.
+  git clean -dxf
+
   git checkout "$branch"
-  COCKROACH_BUILDER_CCACHE=1 build/builder.sh make test testrace TESTS=-
+  # Stupid submodules.
+  rm -rf vendor; git checkout vendor; git submodule update --init --recursive
+  COCKROACH_BUILDER_CCACHE=1 build/builder.sh make test testrace TESTTIMEOUT=45m TESTS=-
   # TODO(benesch): store the acceptanceversion somewhere more accessible.
   docker pull $(git grep cockroachdb/acceptance -- '*.go' | sed -E 's/.*"([^"]*).*"/\1/') || true
 done
@@ -122,6 +143,33 @@ SuccessExitStatus=0 143
 WantedBy=multi-user.target
 EOF
 systemctl enable teamcity-agent.service
+
+# Enable LRU pruning of Docker images.
+# https://github.com/stepchowfun/docuum#running-docuum-in-a-docker-container
+DOCUUM_VERSION=0.9.4
+cat > /etc/systemd/system/docuum.service <<EOF
+[Unit]
+Description=Remove Stale Docker Images
+After=docker.service
+Requires=docker.service
+
+[Service]
+ExecStart=/usr/bin/docker run \
+          --init \
+          --rm \
+          --tty \
+          --name docuum \
+          --volume /var/run/docker.sock:/var/run/docker.sock \
+          --volume docuum:/root stephanmisc/docuum:$DOCUUM_VERSION \
+          --threshold '128 GB'
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable docuum.service
+# Prefetch the image
+docker pull stephanmisc/docuum:$DOCUUM_VERSION
 
 # Boot the TeamCity agent so it can be upgraded by the server (i.e., download
 # and install whatever plugins the server has installed) before we bake the

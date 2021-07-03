@@ -1,16 +1,12 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package ts
 
@@ -18,12 +14,14 @@ import (
 	"context"
 	"math"
 
-	"github.com/cockroachdb/cockroach/pkg/internal/client"
+	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/storage"
+	"github.com/cockroachdb/cockroach/pkg/ts/catalog"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
+	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	gwruntime "github.com/grpc-ecosystem/grpc-gateway/runtime"
@@ -94,9 +92,9 @@ type Server struct {
 	nodeCountFn      ClusterNodeCountFn
 	queryMemoryMax   int64
 	queryWorkerMax   int
-	workerMemMonitor mon.BytesMonitor
-	resultMemMonitor mon.BytesMonitor
-	workerSem        chan struct{}
+	workerMemMonitor *mon.BytesMonitor
+	resultMemMonitor *mon.BytesMonitor
+	workerSem        *quotapool.IntPool
 }
 
 // MakeServer instantiates a new Server which services requests with data from
@@ -119,13 +117,14 @@ func MakeServer(
 	if cfg.QueryMemoryMax != 0 {
 		queryMemoryMax = cfg.QueryMemoryMax
 	}
-
+	workerSem := quotapool.NewIntPool("ts.Server worker", uint64(queryWorkerMax))
+	stopper.AddCloser(workerSem.Closer("stopper"))
 	return Server{
 		AmbientContext: ambient,
 		db:             db,
 		stopper:        stopper,
 		nodeCountFn:    nodeCountFn,
-		workerMemMonitor: mon.MakeUnlimitedMonitor(
+		workerMemMonitor: mon.NewUnlimitedMonitor(
 			context.Background(),
 			"timeseries-workers",
 			mon.MemoryResource,
@@ -136,7 +135,7 @@ func MakeServer(
 			queryMemoryMax*2,
 			db.st,
 		),
-		resultMemMonitor: mon.MakeUnlimitedMonitor(
+		resultMemMonitor: mon.NewUnlimitedMonitor(
 			context.Background(),
 			"timeseries-results",
 			mon.MemoryResource,
@@ -147,7 +146,7 @@ func MakeServer(
 		),
 		queryMemoryMax: queryMemoryMax,
 		queryWorkerMax: queryWorkerMax,
-		workerSem:      make(chan struct{}, queryWorkerMax),
+		workerSem:      workerSem,
 	}
 }
 
@@ -184,7 +183,7 @@ func (s *Server) Query(
 	// dead. This is a conservatively long span, but gives us a good indication of
 	// when a gap likely indicates an outage (and thus missing values should not
 	// be interpolated).
-	interpolationLimit := storage.TimeUntilStoreDead.Get(&s.db.st.SV).Nanoseconds()
+	interpolationLimit := kvserver.TimeUntilStoreDead.Get(&s.db.st.SV).Nanoseconds()
 
 	// Get the estimated number of nodes on the cluster, used to compute more
 	// accurate memory usage estimates. Set a minimum of 1 in order to avoid
@@ -251,8 +250,8 @@ func (s *Server) Query(
 
 					// Create a memory account for the results of this query.
 					memContexts[queryIdx] = MakeQueryMemoryContext(
-						&s.workerMemMonitor,
-						&s.resultMemMonitor,
+						s.workerMemMonitor,
+						s.resultMemMonitor,
 						QueryMemoryOptions{
 							BudgetBytes:             s.queryMemoryMax / int64(s.queryWorkerMax),
 							EstimatedSources:        estimatedSourceCount,
@@ -314,32 +313,79 @@ func (s *Server) Query(
 // server. Only data from the 10-second resolution is returned; rollup data is
 // not currently returned. Data is returned in the order it is read from disk,
 // and will thus not be totally organized by series.
+//
+// TODO(tbg): needs testing that restricting to individual timeseries works
+// and that the date range restrictions are respected. Should be easy enough to
+// set up a KV store and write some keys into it (`MakeDataKey`) to do so without
+// setting up a `*Server`.
 func (s *Server) Dump(req *tspb.DumpRequest, stream tspb.TimeSeries_DumpServer) error {
-	ctx := stream.Context()
-	span := roachpb.Span{
-		Key:    roachpb.Key(firstTSRKey),
-		EndKey: roachpb.Key(lastTSRKey),
+	return dumpImpl(s.db.db, req, stream)
+}
+
+func dumpImpl(db *kv.DB, req *tspb.DumpRequest, stream tspb.TimeSeries_DumpServer) error {
+	names := req.Names
+	if len(names) == 0 {
+		names = catalog.AllMetricsNames()
+	}
+	resolutions := req.Resolutions
+	if len(resolutions) == 0 {
+		resolutions = []tspb.TimeSeriesResolution{tspb.TimeSeriesResolution_RESOLUTION_10S}
+	}
+	for _, seriesName := range names {
+		for _, res := range resolutions {
+			if err := dumpTimeseriesAllSources(
+				db, seriesName, ResolutionFromProto(res), req.StartNanos, req.EndNanos, stream,
+			); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func dumpTimeseriesAllSources(
+	db *kv.DB,
+	seriesName string,
+	diskResolution Resolution,
+	startNanos, endNanos int64,
+	stream tspb.TimeSeries_DumpServer,
+) error {
+	if endNanos == 0 {
+		endNanos = math.MaxInt64
 	}
 
-	for span.Valid() {
-		b := &client.Batch{}
+	if delta := diskResolution.SlabDuration() - 1; endNanos > math.MaxInt64-delta {
+		endNanos = math.MaxInt64
+	} else {
+		endNanos += delta
+	}
+
+	ctx := stream.Context()
+	span := &roachpb.Span{
+		Key: MakeDataKey(
+			seriesName, "" /* source */, diskResolution, startNanos,
+		),
+		EndKey: MakeDataKey(
+			seriesName, "" /* source */, diskResolution, endNanos,
+		),
+	}
+
+	for span != nil {
+		b := &kv.Batch{}
 		b.Header.MaxSpanRequestKeys = dumpBatchSize
 		b.Scan(span.Key, span.EndKey)
-		err := s.db.db.Run(ctx, b)
+		err := db.Run(ctx, b)
 		if err != nil {
 			return err
 		}
 		result := b.Results[0]
+
 		span = result.ResumeSpan
 		for i := range result.Rows {
 			row := &result.Rows[i]
-			name, source, resolution, _, err := DecodeDataKey(row.Key)
+			name, source, _, _, err := DecodeDataKey(row.Key)
 			if err != nil {
 				return err
-			}
-			if resolution != Resolution10s {
-				// Only return the highest resolution data.
-				continue
 			}
 			var idata roachpb.InternalTimeSeriesData
 			if err := row.ValueProto(&idata); err != nil {

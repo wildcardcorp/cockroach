@@ -1,16 +1,12 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package sql
 
@@ -18,14 +14,17 @@ import (
 	"context"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
+	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
+	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 )
 
 type commentOnDatabaseNode struct {
 	n      *tree.CommentOnDatabase
-	dbDesc *sqlbase.DatabaseDescriptor
+	dbDesc *dbdesc.Immutable
 }
 
 // CommentOnDatabase add comment on a database.
@@ -34,11 +33,19 @@ type commentOnDatabaseNode struct {
 func (p *planner) CommentOnDatabase(
 	ctx context.Context, n *tree.CommentOnDatabase,
 ) (planNode, error) {
-	dbDesc, err := p.ResolveUncachedDatabaseByName(ctx, string(n.Name), true)
-	if err != nil {
+	if err := checkSchemaChangeEnabled(
+		ctx,
+		p.ExecCfg(),
+		"COMMENT ON DATABASE",
+	); err != nil {
 		return nil, err
 	}
 
+	_, dbDesc, err := p.Descriptors().GetImmutableDatabaseByName(ctx, p.txn,
+		string(n.Name), tree.DatabaseLookupFlags{Required: true})
+	if err != nil {
+		return nil, err
+	}
 	if err := p.CheckPrivilege(ctx, dbDesc, privilege.CREATE); err != nil {
 		return nil, err
 	}
@@ -48,47 +55,43 @@ func (p *planner) CommentOnDatabase(
 
 func (n *commentOnDatabaseNode) startExec(params runParams) error {
 	if n.n.Comment != nil {
-		_, err := params.p.extendedEvalCtx.ExecCfg.InternalExecutor.Exec(
+		_, err := params.p.extendedEvalCtx.ExecCfg.InternalExecutor.ExecEx(
 			params.ctx,
 			"set-db-comment",
 			params.p.Txn(),
+			sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 			"UPSERT INTO system.comments VALUES ($1, $2, 0, $3)",
 			keys.DatabaseCommentType,
-			n.dbDesc.ID,
+			n.dbDesc.GetID(),
 			*n.n.Comment)
 		if err != nil {
 			return err
 		}
 	} else {
-		_, err := params.p.extendedEvalCtx.ExecCfg.InternalExecutor.Exec(
+		_, err := params.p.extendedEvalCtx.ExecCfg.InternalExecutor.ExecEx(
 			params.ctx,
 			"delete-db-comment",
 			params.p.Txn(),
+			sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 			"DELETE FROM system.comments WHERE type=$1 AND object_id=$2 AND sub_id=0",
 			keys.DatabaseCommentType,
-			n.dbDesc.ID)
+			n.dbDesc.GetID())
 		if err != nil {
 			return err
 		}
 	}
 
-	return MakeEventLogger(params.extendedEvalCtx.ExecCfg).InsertEventRecord(
-		params.ctx,
-		params.p.txn,
-		EventLogCommentOnDatabase,
-		int32(n.dbDesc.ID),
-		int32(params.extendedEvalCtx.NodeID),
-		struct {
-			DatabaseName string
-			Statement    string
-			User         string
-			Comment      *string
-		}{
-			n.n.Name.String(),
-			n.n.String(),
-			params.SessionData().User,
-			n.n.Comment},
-	)
+	comment := ""
+	if n.n.Comment != nil {
+		comment = *n.n.Comment
+	}
+	return params.p.logEvent(params.ctx,
+		n.dbDesc.GetID(),
+		&eventpb.CommentOnDatabase{
+			DatabaseName: n.n.Name.String(),
+			Comment:      comment,
+			NullComment:  n.n.Comment == nil,
+		})
 }
 
 func (n *commentOnDatabaseNode) Next(runParams) (bool, error) { return false, nil }

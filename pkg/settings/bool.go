@@ -1,16 +1,12 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package settings
 
@@ -22,7 +18,7 @@ type BoolSetting struct {
 	defaultValue bool
 }
 
-var _ Setting = &BoolSetting{}
+var _ extendedSetting = &BoolSetting{}
 
 // Get retrieves the bool value in the setting.
 func (b *BoolSetting) Get(sv *Values) bool {
@@ -48,9 +44,29 @@ func (*BoolSetting) Typ() string {
 	return "b"
 }
 
-// Override changes the setting without validation.
+// Default returns default value for setting.
+func (b *BoolSetting) Default() bool {
+	return b.defaultValue
+}
+
+// Defeat the linter.
+var _ = (*BoolSetting).Default
+
+// Override changes the setting without validation and also overrides the
+// default value.
+//
 // For testing usage only.
 func (b *BoolSetting) Override(sv *Values, v bool) {
+	b.set(sv, v)
+
+	vInt := int64(0)
+	if v {
+		vInt = 1
+	}
+	sv.setDefaultOverrideInt64(b.slotIdx, vInt)
+}
+
+func (b *BoolSetting) set(sv *Values, v bool) {
 	vInt := int64(0)
 	if v {
 		vInt = 1
@@ -58,13 +74,30 @@ func (b *BoolSetting) Override(sv *Values, v bool) {
 	sv.setInt64(b.slotIdx, vInt)
 }
 
-func (b *BoolSetting) set(sv *Values, v bool) {
-	b.Override(sv, v)
-}
-
 func (b *BoolSetting) setToDefault(sv *Values) {
+	// See if the default value was overridden.
+	ok, val, _ := sv.getDefaultOverride(b.slotIdx)
+	if ok {
+		b.set(sv, val > 0)
+		return
+	}
 	b.set(sv, b.defaultValue)
 }
+
+// WithPublic sets public visibility and can be chained.
+func (b *BoolSetting) WithPublic() *BoolSetting {
+	b.SetVisibility(Public)
+	return b
+}
+
+// WithSystemOnly marks this setting as system-only and can be chained.
+func (b *BoolSetting) WithSystemOnly() *BoolSetting {
+	b.common.systemOnly = true
+	return b
+}
+
+// Defeat the linter.
+var _ = (*BoolSetting).WithSystemOnly
 
 // RegisterBoolSetting defines a new setting with type bool.
 func RegisterBoolSetting(key, desc string, defaultValue bool) *BoolSetting {

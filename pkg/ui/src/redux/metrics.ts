@@ -1,16 +1,12 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 /**
  * This module maintains the state of CockroachDB time series queries needed by
@@ -21,10 +17,10 @@
 
 import _ from "lodash";
 import { Action } from "redux";
-import { delay } from "redux-saga";
+import { delay } from "redux-saga/effects";
 import { take, fork, call, all, put } from "redux-saga/effects";
 
-import * as protos from  "src/js/protos";
+import * as protos from "src/js/protos";
 import { PayloadAction } from "src/interfaces/action";
 import { queryTimeSeries } from "src/util/api";
 
@@ -42,7 +38,7 @@ export const FETCH_COMPLETE = "cockroachui/metrics/FETCH_COMPLETE";
  * WithID is a convenient interface for associating arbitrary data structures
  * with a component ID.
  */
-interface WithID<T> {
+export interface WithID<T> {
   id: string;
   data: T;
 }
@@ -50,7 +46,7 @@ interface WithID<T> {
 /**
  * A request/response pair.
  */
-interface RequestWithResponse {
+export interface RequestWithResponse {
   request: TSRequest;
   response: TSResponse;
 }
@@ -87,15 +83,17 @@ export class MetricsQuery {
 function metricsQueryReducer(state: MetricsQuery, action: Action) {
   switch (action.type) {
     // This component has requested a new set of metrics from the server.
-    case REQUEST:
+    case REQUEST: {
       const { payload: request } = action as PayloadAction<WithID<TSRequest>>;
       state = _.clone(state);
       state.nextRequest = request.data;
       return state;
-
+    }
     // Results for a previous request have been received from the server.
-    case RECEIVE:
-      const { payload: response } = action as PayloadAction<WithID<RequestWithResponse>>;
+    case RECEIVE: {
+      const { payload: response } = action as PayloadAction<
+        WithID<RequestWithResponse>
+      >;
       if (response.data.request === state.nextRequest) {
         state = _.clone(state);
         state.data = response.data.response;
@@ -103,14 +101,14 @@ function metricsQueryReducer(state: MetricsQuery, action: Action) {
         state.error = undefined;
       }
       return state;
-
+    }
     // The previous query for metrics for this component encountered an error.
-    case ERROR:
+    case ERROR: {
       const { payload: error } = action as PayloadAction<WithID<Error>>;
       state = _.clone(state);
       state.error = error.data;
       return state;
-
+    }
     default:
       return state;
   }
@@ -128,18 +126,24 @@ interface MetricQuerySet {
  * metricsQueriesReducer dispatches actions to the correct MetricsQuery, based
  * on the ID of the actions.
  */
-export function metricQuerySetReducer(state: MetricQuerySet = {}, action: Action) {
+export function metricQuerySetReducer(
+  state: MetricQuerySet = {},
+  action: Action,
+) {
   switch (action.type) {
     case REQUEST:
     case RECEIVE:
-    case ERROR:
+    case ERROR: {
       // All of these requests should be dispatched to a MetricQuery in the
       // collection. If a MetricQuery with that ID does not yet exist, create it.
       const { id } = (action as PayloadAction<WithID<any>>).payload;
       state = _.clone(state);
-      state[id] = metricsQueryReducer(state[id] || new MetricsQuery(id), action);
+      state[id] = metricsQueryReducer(
+        state[id] || new MetricsQuery(id),
+        action,
+      );
       return state;
-
+    }
     default:
       return state;
   }
@@ -161,7 +165,10 @@ export class MetricsState {
  * dispatching them based on ID. It also accepts actions which indicate the
  * state of the connection to the server.
  */
-export function metricsReducer(state: MetricsState = new MetricsState(), action: Action): MetricsState {
+export function metricsReducer(
+  state: MetricsState = new MetricsState(),
+  action: Action,
+): MetricsState {
   switch (action.type) {
     // A new fetch request to the server is now in flight.
     case FETCH:
@@ -187,7 +194,10 @@ export function metricsReducer(state: MetricsState = new MetricsState(), action:
  * requestMetrics indicates that a component is requesting new data from the
  * server.
  */
-export function requestMetrics(id: string, request: TSRequest): PayloadAction<WithID<TSRequest>> {
+export function requestMetrics(
+  id: string,
+  request: TSRequest,
+): PayloadAction<WithID<TSRequest>> {
   return {
     type: REQUEST,
     payload: {
@@ -201,7 +211,10 @@ export function requestMetrics(id: string, request: TSRequest): PayloadAction<Wi
  * beginMetrics is dispatched by the processing saga to indicate that it has
  * begun the process of dispatching a request.
  */
-export function beginMetrics(id: string, request: TSRequest): PayloadAction<WithID<TSRequest>> {
+export function beginMetrics(
+  id: string,
+  request: TSRequest,
+): PayloadAction<WithID<TSRequest>> {
   return {
     type: BEGIN,
     payload: {
@@ -236,7 +249,10 @@ export function receiveMetrics(
  * errorMetrics indicates that a previous request from this component could not
  * be fulfilled due to an error.
  */
-export function errorMetrics(id: string, error: Error): PayloadAction<WithID<Error>> {
+export function errorMetrics(
+  id: string,
+  error: Error,
+): PayloadAction<WithID<Error>> {
   return {
     type: ERROR,
     payload: {
@@ -279,10 +295,12 @@ export function* queryMetricsSaga() {
   let requests: WithID<TSRequest>[] = [];
 
   while (true) {
-    const requestAction: PayloadAction<WithID<TSRequest>> = yield take((REQUEST));
+    const requestAction: PayloadAction<WithID<TSRequest>> = yield take(REQUEST);
 
     // Dispatch action to underlying store.
-    yield put(beginMetrics(requestAction.payload.id, requestAction.payload.data));
+    yield put(
+      beginMetrics(requestAction.payload.id, requestAction.payload.data),
+    );
     requests.push(requestAction.payload);
 
     // If no other requests are queued, fork a process which will send the
@@ -296,7 +314,7 @@ export function* queryMetricsSaga() {
     // Delay of zero will defer execution to the message queue, allowing the
     // currently executing event (e.g. rendering a new page or a timespan change)
     // to dispatch additional requests which can be batched.
-    yield call(delay, 0);
+    yield delay(0);
 
     const requestsToSend = requests;
     requests = [];
@@ -315,7 +333,7 @@ export function* batchAndSendRequests(requests: WithID<TSRequest>[]) {
   requests = [];
 
   yield put(fetchMetrics());
-  yield all(_.map(batches, batch => call(sendRequestBatch, batch)));
+  yield all(_.map(batches, (batch) => call(sendRequestBatch, batch)));
   yield put(fetchMetricsComplete());
 }
 
@@ -325,7 +343,7 @@ export function* batchAndSendRequests(requests: WithID<TSRequest>[]) {
 export function* sendRequestBatch(requests: WithID<TSRequest>[]) {
   // Flatten the queries from the batch into a single request.
   const unifiedRequest = _.clone(requests[0].data);
-  unifiedRequest.queries = _.flatMap(requests, req => req.data.queries);
+  unifiedRequest.queries = _.flatMap(requests, (req) => req.data.queries);
 
   let response: protos.cockroach.ts.tspb.TimeSeriesQueryResponse;
   try {
@@ -348,13 +366,15 @@ export function* sendRequestBatch(requests: WithID<TSRequest>[]) {
   // query. Each request may have sent multiple queries in the batch.
   const results = response.results;
   for (const request of requests) {
-    yield put(receiveMetrics(
-      request.id,
-      request.data,
-      new protos.cockroach.ts.tspb.TimeSeriesQueryResponse({
-        results: results.splice(0, request.data.queries.length),
-      }),
-    ));
+    yield put(
+      receiveMetrics(
+        request.id,
+        request.data,
+        new protos.cockroach.ts.tspb.TimeSeriesQueryResponse({
+          results: results.splice(0, request.data.queries.length),
+        }),
+      ),
+    );
   }
 }
 
@@ -364,5 +384,9 @@ interface SimpleTimespan {
 }
 
 function timespanKey(timewindow: SimpleTimespan): string {
-  return (timewindow.start_nanos && timewindow.start_nanos.toString()) + ":" + (timewindow.end_nanos && timewindow.end_nanos.toString());
+  return (
+    (timewindow.start_nanos && timewindow.start_nanos.toString()) +
+    ":" +
+    (timewindow.end_nanos && timewindow.end_nanos.toString())
+  );
 }

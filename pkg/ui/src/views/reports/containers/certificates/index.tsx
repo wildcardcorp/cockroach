@@ -1,29 +1,29 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 import _ from "lodash";
-import React from "react";
+import React, { Fragment } from "react";
 import { Helmet } from "react-helmet";
 import { connect } from "react-redux";
-import { RouterState } from "react-router";
+import { RouteComponentProps, withRouter } from "react-router-dom";
 
 import * as protos from "src/js/protos";
-import { certificatesRequestKey, refreshCertificates } from "src/redux/apiReducers";
+import {
+  certificatesRequestKey,
+  refreshCertificates,
+} from "src/redux/apiReducers";
 import { AdminUIState } from "src/redux/state";
 import { nodeIDAttr } from "src/util/constants";
 import { LongToMoment } from "src/util/convert";
-import Loading from "src/views/shared/components/loading";
+import { Loading } from "@cockroachlabs/cluster-ui";
+import { getMatchParamByName } from "src/util/query";
 
 interface CertificatesOwnProps {
   certificates: protos.cockroach.server.serverpb.CertificatesResponse;
@@ -33,7 +33,7 @@ interface CertificatesOwnProps {
 
 const dateFormat = "Y-MM-DD HH:mm:ss";
 
-type CertificatesProps = CertificatesOwnProps & RouterState;
+type CertificatesProps = CertificatesOwnProps & RouteComponentProps;
 
 const emptyRow = (
   <tr className="certs-table__row">
@@ -44,26 +44,26 @@ const emptyRow = (
 
 function certificatesRequestFromProps(props: CertificatesProps) {
   return new protos.cockroach.server.serverpb.CertificatesRequest({
-    node_id: props.params[nodeIDAttr],
+    node_id: getMatchParamByName(props.match, nodeIDAttr),
   });
 }
 
 /**
  * Renders the Certificate Report page.
  */
-class Certificates extends React.Component<CertificatesProps, {}> {
+export class Certificates extends React.Component<CertificatesProps, {}> {
   refresh(props = this.props) {
     props.refreshCertificates(certificatesRequestFromProps(props));
   }
 
-  componentWillMount() {
+  componentDidMount() {
     // Refresh nodes status query when mounting.
     this.refresh();
   }
 
-  componentWillReceiveProps(nextProps: CertificatesProps) {
-    if (this.props.location !== nextProps.location) {
-      this.refresh(nextProps);
+  componentDidUpdate(prevProps: CertificatesProps) {
+    if (!_.isEqual(this.props.location, prevProps.location)) {
+      this.refresh(this.props);
     }
   }
 
@@ -74,8 +74,12 @@ class Certificates extends React.Component<CertificatesProps, {}> {
     }
     return (
       <tr className="certs-table__row">
-        <th className="certs-table__cell certs-table__cell--header">{header}</th>
-        <td className="certs-table__cell" title={realTitle}>{value}</td>
+        <th className="certs-table__cell certs-table__cell--header">
+          {header}
+        </th>
+        <td className="certs-table__cell" title={realTitle}>
+          {value}
+        </td>
       </tr>
     );
   }
@@ -83,19 +87,15 @@ class Certificates extends React.Component<CertificatesProps, {}> {
   renderMultilineRow(header: string, values: string[]) {
     return (
       <tr className="certs-table__row">
-        <th className="certs-table__cell certs-table__cell--header">{header}</th>
+        <th className="certs-table__cell certs-table__cell--header">
+          {header}
+        </th>
         <td className="certs-table__cell" title={_.join(values, "\n")}>
           <ul className="certs-entries-list">
-            {
-              _.chain(values)
-                .sort()
-                .map((value, key) => (
-                  <li key={key}>
-                    {value}
-                  </li>
-                ))
-                .value()
-            }
+            {_.chain(values)
+              .sort()
+              .map((value, key) => <li key={key}>{value}</li>)
+              .value()}
           </ul>
         </td>
       </tr>
@@ -108,7 +108,10 @@ class Certificates extends React.Component<CertificatesProps, {}> {
     return this.renderSimpleRow(header, timestamp, title);
   }
 
-  renderFields(fields: protos.cockroach.server.serverpb.CertificateDetails.IFields, id: number) {
+  renderFields(
+    fields: protos.cockroach.server.serverpb.CertificateDetails.IFields,
+    id: number,
+  ) {
     return [
       this.renderSimpleRow("Cert ID", id.toString()),
       this.renderSimpleRow("Issuer", fields.issuer),
@@ -123,25 +126,34 @@ class Certificates extends React.Component<CertificatesProps, {}> {
     ];
   }
 
-  renderCert(cert: protos.cockroach.server.serverpb.ICertificateDetails, key: number) {
+  renderCert(
+    cert: protos.cockroach.server.serverpb.ICertificateDetails,
+    key: number,
+  ) {
     let certType: string;
     switch (cert.type) {
-      case protos.cockroach.server.serverpb.CertificateDetails.CertificateType.CA:
+      case protos.cockroach.server.serverpb.CertificateDetails.CertificateType
+        .CA:
         certType = "Certificate Authority";
         break;
-      case protos.cockroach.server.serverpb.CertificateDetails.CertificateType.NODE:
+      case protos.cockroach.server.serverpb.CertificateDetails.CertificateType
+        .NODE:
         certType = "Node Certificate";
         break;
-      case protos.cockroach.server.serverpb.CertificateDetails.CertificateType.CLIENT_CA:
+      case protos.cockroach.server.serverpb.CertificateDetails.CertificateType
+        .CLIENT_CA:
         certType = "Client Certificate Authority";
         break;
-      case protos.cockroach.server.serverpb.CertificateDetails.CertificateType.CLIENT:
+      case protos.cockroach.server.serverpb.CertificateDetails.CertificateType
+        .CLIENT:
         certType = "Client Certificate";
         break;
-      case protos.cockroach.server.serverpb.CertificateDetails.CertificateType.UI_CA:
+      case protos.cockroach.server.serverpb.CertificateDetails.CertificateType
+        .UI_CA:
         certType = "UI Certificate Authority";
         break;
-      case protos.cockroach.server.serverpb.CertificateDetails.CertificateType.UI:
+      case protos.cockroach.server.serverpb.CertificateDetails.CertificateType
+        .UI:
         certType = "UI Certificate";
         break;
       default:
@@ -151,58 +163,52 @@ class Certificates extends React.Component<CertificatesProps, {}> {
       <table key={key} className="certs-table">
         <tbody>
           {this.renderSimpleRow("Type", certType)}
-          {
-            _.map(cert.fields, (fields, id) => {
-              const result = this.renderFields(fields, id);
-              if (id > 0) {
-                result.unshift(emptyRow);
-              }
-              return result;
-            })
-          }
+          {_.map(cert.fields, (fields, id) => {
+            const result = this.renderFields(fields, id);
+            if (id > 0) {
+              result.unshift(emptyRow);
+            }
+            return result;
+          })}
         </tbody>
       </table>
     );
   }
 
   renderContent = () => {
-    const { certificates } = this.props;
-    const nodeID = this.props.params[nodeIDAttr];
+    const { certificates, match } = this.props;
+    const nodeId = getMatchParamByName(match, nodeIDAttr);
 
     if (_.isEmpty(certificates.certificates)) {
       return (
-        <React.Fragment>
-          <h2>No certificates were found on node {this.props.params[nodeIDAttr]}.</h2>
-        </React.Fragment>
+        <h2 className="base-heading">
+          No certificates were found on node {nodeId}.
+        </h2>
       );
     }
 
     let header: string = null;
-    if (_.isNaN(parseInt(nodeID, 10))) {
+    if (_.isNaN(parseInt(nodeId, 10))) {
       header = "Local Node";
     } else {
-      header = `Node ${nodeID}`;
+      header = `Node ${nodeId}`;
     }
 
     return (
-      <React.Fragment>
-        <h2>{header} certificates</h2>
-        {
-          _.map(certificates.certificates, (cert, key) => (
-            this.renderCert(cert, key)
-          ))
-        }
-      </React.Fragment>
+      <Fragment>
+        <h2 className="base-heading">{header} certificates</h2>
+        {_.map(certificates.certificates, (cert, key) =>
+          this.renderCert(cert, key),
+        )}
+      </Fragment>
     );
-  }
+  };
 
   render() {
     return (
       <div className="section">
-        <Helmet>
-          <title>Certificates | Debug</title>
-        </Helmet>
-        <h1>Certificates</h1>
+        <Helmet title="Certificates | Debug" />
+        <h1 className="base-heading">Certificates</h1>
 
         <section className="section">
           <Loading
@@ -216,16 +222,22 @@ class Certificates extends React.Component<CertificatesProps, {}> {
   }
 }
 
-function mapStateToProps(state: AdminUIState, props: CertificatesProps) {
+const mapStateToProps = (state: AdminUIState, props: CertificatesProps) => {
   const nodeIDKey = certificatesRequestKey(certificatesRequestFromProps(props));
   return {
-    certificates: state.cachedData.certificates[nodeIDKey] && state.cachedData.certificates[nodeIDKey].data,
-    lastError: state.cachedData.certificates[nodeIDKey] && state.cachedData.certificates[nodeIDKey].lastError,
+    certificates:
+      state.cachedData.certificates[nodeIDKey] &&
+      state.cachedData.certificates[nodeIDKey].data,
+    lastError:
+      state.cachedData.certificates[nodeIDKey] &&
+      state.cachedData.certificates[nodeIDKey].lastError,
   };
-}
+};
 
-const actions = {
+const mapDispatchToProps = {
   refreshCertificates,
 };
 
-export default connect(mapStateToProps, actions)(Certificates);
+export default withRouter(
+  connect(mapStateToProps, mapDispatchToProps)(Certificates),
+);

@@ -1,21 +1,19 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package jobs_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"math"
 	"reflect"
 	"testing"
@@ -25,9 +23,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/server"
+	"github.com/cockroachdb/cockroach/pkg/security"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/optionalnodeliveness"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness/slinstance"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness/slstorage"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
@@ -38,28 +40,32 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
-	"github.com/pkg/errors"
+	"github.com/cockroachdb/cockroach/pkg/util/uuid"
+	"github.com/cockroachdb/errors"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRoundtripJob(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
 
 	ctx := context.Background()
 	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
 	registry := s.JobRegistry().(*jobs.Registry)
 	defer s.Stopper().Stop(ctx)
 
+	jobID := registry.MakeJobID()
 	storedJob := registry.NewJob(jobs.Record{
 		Description:   "beep boop",
-		Username:      "robot",
-		DescriptorIDs: sqlbase.IDs{42},
+		Username:      security.MakeSQLUsernameFromPreNormalizedString("robot"),
+		DescriptorIDs: descpb.IDs{42},
 		Details:       jobspb.RestoreDetails{},
 		Progress:      jobspb.RestoreProgress{},
-	})
+	}, jobID)
 	if err := storedJob.Created(ctx); err != nil {
 		t.Fatal(err)
 	}
-	retrievedJob, err := registry.LoadJob(ctx, *storedJob.ID())
+	retrievedJob, err := registry.LoadJob(ctx, jobID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,30 +77,44 @@ func TestRoundtripJob(t *testing.T) {
 
 func TestRegistryResumeExpiredLease(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	defer jobs.ResetResumeHooks()()
+	defer log.Scope(t).Close(t)
+	defer jobs.ResetConstructors()()
 
 	ctx := context.Background()
-	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
+
+	ver201 := cluster.MakeTestingClusterSettingsWithVersions(
+		roachpb.Version{Major: 20, Minor: 1},
+		roachpb.Version{Major: 20, Minor: 1},
+		true)
+	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{Settings: ver201})
 	defer s.Stopper().Stop(ctx)
 
 	// Disable leniency for instant expiration
 	jobs.LeniencySetting.Override(&s.ClusterSettings().SV, 0)
+	const cancelInterval = time.Duration(math.MaxInt64)
+	const adoptInterval = time.Microsecond
+	slinstance.DefaultTTL.Override(&s.ClusterSettings().SV, 2*adoptInterval)
+	slinstance.DefaultHeartBeat.Override(&s.ClusterSettings().SV, adoptInterval)
 
 	db := s.DB()
 	clock := hlc.NewClock(hlc.UnixNano, time.Nanosecond)
 	nodeLiveness := jobs.NewFakeNodeLiveness(4)
 	newRegistry := func(id roachpb.NodeID) *jobs.Registry {
-		const cancelInterval = time.Duration(math.MaxInt64)
-		const adoptInterval = time.Nanosecond
-
+		var c base.NodeIDContainer
+		c.Set(ctx, id)
+		idContainer := base.NewSQLIDContainer(0, &c)
 		ac := log.AmbientContext{Tracer: tracing.NewTracer()}
-		nodeID := &base.NodeIDContainer{}
-		nodeID.Reset(id)
-		r := jobs.MakeRegistry(
-			ac, s.Stopper(), clock, db, s.InternalExecutor().(sqlutil.InternalExecutor),
-			nodeID, s.ClusterSettings(), server.DefaultHistogramWindowInterval, jobs.FakePHS,
+		sqlStorage := slstorage.NewStorage(
+			s.Stopper(), clock, db, s.InternalExecutor().(sqlutil.InternalExecutor), s.ClusterSettings(),
 		)
-		if err := r.Start(ctx, s.Stopper(), nodeLiveness, cancelInterval, adoptInterval); err != nil {
+		sqlInstance := slinstance.NewSQLInstance(s.Stopper(), clock, sqlStorage, s.ClusterSettings())
+		r := jobs.MakeRegistry(
+			ac, s.Stopper(), clock, optionalnodeliveness.MakeContainer(nodeLiveness), db,
+			s.InternalExecutor().(sqlutil.InternalExecutor), idContainer, sqlInstance,
+			s.ClusterSettings(), base.DefaultHistogramWindowInterval(), jobs.FakePHS, "",
+			nil, /* knobs */
+		)
+		if err := r.Start(ctx, s.Stopper(), cancelInterval, adoptInterval); err != nil {
 			t.Fatal(err)
 		}
 		return r
@@ -117,43 +137,55 @@ func TestRegistryResumeExpiredLease(t *testing.T) {
 	}
 
 	// jobMap maps node IDs to job IDs.
-	jobMap := make(map[roachpb.NodeID]int64)
+	jobMap := make(map[roachpb.NodeID]jobspb.JobID)
 	hookCallCount := 0
 	// resumeCounts maps jobs IDs to number of start/resumes.
-	resumeCounts := make(map[int64]int)
+	resumeCounts := make(map[jobspb.JobID]int)
 	// done prevents jobs from finishing.
 	done := make(chan struct{})
 	// resumeCalled does a locked, blocking send when a job is started/resumed. A
 	// receive on it will block until a job is running.
 	resumeCalled := make(chan struct{})
 	var lock syncutil.Mutex
-	jobs.AddResumeHook(func(_ jobspb.Type, _ *cluster.Settings) jobs.Resumer {
+	jobs.RegisterConstructor(jobspb.TypeBackup, func(job *jobs.Job, _ *cluster.Settings) jobs.Resumer {
 		lock.Lock()
 		hookCallCount++
 		lock.Unlock()
-		return jobs.FakeResumer{OnResume: func(job *jobs.Job) error {
-			select {
-			case resumeCalled <- struct{}{}:
-			case <-done:
-			}
-			lock.Lock()
-			resumeCounts[*job.ID()]++
-			lock.Unlock()
-			<-done
-			return nil
-		}}
+		return jobs.FakeResumer{
+			OnResume: func(ctx context.Context) error {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case resumeCalled <- struct{}{}:
+				case <-done:
+				}
+				lock.Lock()
+				resumeCounts[job.ID()]++
+				lock.Unlock()
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-done:
+					return nil
+				}
+			},
+		}
 	})
 
 	for i := 0; i < jobCount; i++ {
 		nodeid := roachpb.NodeID(i + 1)
-		job, _, err := newRegistry(nodeid).StartJob(ctx, nil, jobs.Record{Details: jobspb.BackupDetails{}, Progress: jobspb.BackupProgress{}})
+		rec := jobs.Record{
+			Details:  jobspb.BackupDetails{},
+			Progress: jobspb.BackupProgress{},
+		}
+		job, err := jobs.TestingCreateAndStartJob(ctx, newRegistry(nodeid), db, rec)
 		if err != nil {
 			t.Fatal(err)
 		}
 		// Wait until the job is running.
 		<-resumeCalled
 		lock.Lock()
-		jobMap[nodeid] = *job.ID()
+		jobMap[nodeid] = job.ID()
 		lock.Unlock()
 	}
 
@@ -228,19 +260,23 @@ func TestRegistryResumeExpiredLease(t *testing.T) {
 
 func TestRegistryResumeActiveLease(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
 
-	defer func(oldInterval time.Duration) {
-		jobs.DefaultAdoptInterval = oldInterval
-	}(jobs.DefaultAdoptInterval)
-	jobs.DefaultAdoptInterval = 100 * time.Millisecond
+	defer jobs.TestingSetAdoptAndCancelIntervals(10*time.Millisecond, 10*time.Millisecond)()
 
-	resumeCh := make(chan int64)
-	defer jobs.ResetResumeHooks()()
-	jobs.AddResumeHook(func(_ jobspb.Type, _ *cluster.Settings) jobs.Resumer {
-		return jobs.FakeResumer{OnResume: func(job *jobs.Job) error {
-			resumeCh <- *job.ID()
-			return nil
-		}}
+	resumeCh := make(chan jobspb.JobID)
+	defer jobs.ResetConstructors()()
+	jobs.RegisterConstructor(jobspb.TypeBackup, func(job *jobs.Job, _ *cluster.Settings) jobs.Resumer {
+		return jobs.FakeResumer{
+			OnResume: func(ctx context.Context) error {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case resumeCh <- job.ID():
+					return nil
+				}
+			},
+		}
 	})
 
 	ctx := context.Background()
@@ -262,12 +298,105 @@ func TestRegistryResumeActiveLease(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var id int64
+	var id jobspb.JobID
 	sqlutils.MakeSQLRunner(sqlDB).QueryRow(t,
 		`INSERT INTO system.jobs (status, payload, progress) VALUES ($1, $2, $3) RETURNING id`,
 		jobs.StatusRunning, payload, progress).Scan(&id)
 
 	if e, a := id, <-resumeCh; e != a {
 		t.Fatalf("expected job %d to be resumed, but got %d", e, a)
+	}
+}
+
+// TestExpiringSessionsDoesNotTouchTerminalJobs will ensure that we do not
+// update the claim_session_id field of jobs when expiring sessions or claiming
+// jobs.
+func TestExpiringSessionsAndClaimJobsDoesNotTouchTerminalJobs(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	// Don't adopt, cancel rapidly.
+	defer jobs.TestingSetAdoptAndCancelIntervals(10*time.Hour, 10*time.Millisecond)()
+
+	ctx := context.Background()
+	s, sqlDB, _ := serverutils.StartServer(t, base.TestServerArgs{})
+	defer s.Stopper().Stop(ctx)
+
+	payload, err := protoutil.Marshal(&jobspb.Payload{
+		Details: jobspb.WrapPayloadDetails(jobspb.BackupDetails{}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	progress, err := protoutil.Marshal(&jobspb.Progress{
+		Details: jobspb.WrapProgressDetails(jobspb.BackupProgress{}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tdb := sqlutils.MakeSQLRunner(sqlDB)
+	const insertQuery = `
+   INSERT
+     INTO system.jobs (
+                        status,
+                        payload,
+                        progress,
+                        claim_session_id,
+                        claim_instance_id
+                      )
+   VALUES ($1, $2, $3, $4, $5)
+RETURNING id;
+`
+	terminalStatuses := []jobs.Status{jobs.StatusSucceeded, jobs.StatusCanceled, jobs.StatusFailed}
+	terminalIDs := make([]jobspb.JobID, len(terminalStatuses))
+	terminalClaims := make([][]byte, len(terminalStatuses))
+	for i, s := range terminalStatuses {
+		terminalClaims[i] = uuid.MakeV4().GetBytes() // bogus claim
+		tdb.QueryRow(t, insertQuery, s, payload, progress, terminalClaims[i], 42).
+			Scan(&terminalIDs[i])
+	}
+	var nonTerminalID jobspb.JobID
+	tdb.QueryRow(t, insertQuery, jobs.StatusRunning, payload, progress, uuid.MakeV4().GetBytes(), 42).
+		Scan(&nonTerminalID)
+
+	checkClaimEqual := func(id jobspb.JobID, exp []byte) error {
+		const getClaimQuery = `SELECT claim_session_id FROM system.jobs WHERE id = $1`
+		var claim []byte
+		tdb.QueryRow(t, getClaimQuery, id).Scan(&claim)
+		if !bytes.Equal(claim, exp) {
+			return errors.Errorf("expected nil, got %s", hex.EncodeToString(exp))
+		}
+		return nil
+	}
+	testutils.SucceedsSoon(t, func() error {
+		return checkClaimEqual(nonTerminalID, nil)
+	})
+	for i, id := range terminalIDs {
+		require.NoError(t, checkClaimEqual(id, terminalClaims[i]))
+	}
+	// Update the terminal jobs to set them to have a NULL claim.
+	for _, id := range terminalIDs {
+		tdb.Exec(t, `UPDATE system.jobs SET claim_session_id = NULL WHERE id = $1`, id)
+	}
+	// At this point, all of the jobs should have a NULL claim.
+	// Assert that.
+	for _, id := range append(terminalIDs, nonTerminalID) {
+		require.NoError(t, checkClaimEqual(id, nil))
+	}
+
+	// Nudge the adoption queue and ensure that only the non-terminal job gets
+	// claimed.
+	s.JobRegistry().(*jobs.Registry).TestingNudgeAdoptionQueue()
+
+	sess, err := s.SQLLivenessProvider().(sqlliveness.Provider).Session(ctx)
+	require.NoError(t, err)
+	testutils.SucceedsSoon(t, func() error {
+		return checkClaimEqual(nonTerminalID, sess.ID().UnsafeBytes())
+	})
+	// Ensure that the terminal jobs still have a nil claim.
+	for _, id := range terminalIDs {
+		require.NoError(t, checkClaimEqual(id, nil))
 	}
 }

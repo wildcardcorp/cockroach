@@ -14,21 +14,82 @@ var _ = proto.Marshal
 var _ = fmt.Errorf
 var _ = math.Inf
 
+// This is a compile-time assertion to ensure that this generated file
+// is compatible with the proto package it is being compiled against.
+// A compilation error at this line likely means your copy of the
+// proto package needs to be updated.
+const _ = proto.GoGoProtoPackageIsVersion2 // please upgrade the proto package
+
 // Timestamp represents a state of the hybrid logical clock.
 type Timestamp struct {
 	// Holds a wall time, typically a unix epoch time expressed in
 	// nanoseconds.
+	//
+	// It is not safe to mutate this field directly. Instead, use one of the
+	// methods on Timestamp, which ensure that the synthetic flag is updated
+	// appropriately.
 	WallTime int64 `protobuf:"varint,1,opt,name=wall_time,json=wallTime,proto3" json:"wall_time,omitempty"`
-	// The logical component captures causality for events whose wall
-	// times are equal. It is effectively bounded by (maximum clock
-	// skew)/(minimal ns between events) and nearly impossible to
-	// overflow.
+	// The logical component captures causality for events whose wall times
+	// are equal. It is effectively bounded by (maximum clock skew)/(minimal
+	// ns between events) and nearly impossible to overflow.
+	//
+	// It is not safe to mutate this field directly. Instead, use one of the
+	// methods on Timestamp, which ensure that the synthetic flag is updated
+	// appropriately.
 	Logical int32 `protobuf:"varint,2,opt,name=logical,proto3" json:"logical,omitempty"`
+	// Indicates that the Timestamp did not come from an HLC clock somewhere
+	// in the system and, therefore, does not have the ability to update a
+	// peer's HLC clock. If set to true, the "synthetic timestamp" may be
+	// arbitrarily disconnected from real time.
+	//
+	// The flag serves as the dynamically typed version of a ClockTimestamp
+	// (but inverted). Only Timestamps with this flag set to false can be
+	// downcast to a ClockTimestamp successfully (see TryToClockTimestamp).
+	//
+	// Synthetic timestamps with this flag set to true are central to
+	// non-blocking transactions, which write "into the future". Setting the
+	// flag to true is also used to disconnect some committed MVCC versions
+	// from observed timestamps by indicating that those versions were moved
+	// from the timestamp at which they were originally written. Committed
+	// MVCC versions with synthetic timestamps require observing the full
+	// uncertainty interval, whereas readings off the leaseholders's clock
+	// can tighten the uncertainty interval that is applied to MVCC versions
+	// with clock timestamp.
+	//
+	// This flag does not affect the sort order of Timestamps. However, it
+	// is considered when performing structural equality checks (e.g. using
+	// the == operator). Consider use of the EqOrdering method when testing
+	// for equality.
+	Synthetic bool `protobuf:"varint,3,opt,name=synthetic,proto3" json:"synthetic,omitempty"`
 }
 
-func (m *Timestamp) Reset()                    { *m = Timestamp{} }
-func (*Timestamp) ProtoMessage()               {}
-func (*Timestamp) Descriptor() ([]byte, []int) { return fileDescriptorTimestamp, []int{0} }
+func (m *Timestamp) Reset()      { *m = Timestamp{} }
+func (*Timestamp) ProtoMessage() {}
+func (*Timestamp) Descriptor() ([]byte, []int) {
+	return fileDescriptor_timestamp_e3db50d085ffaa11, []int{0}
+}
+func (m *Timestamp) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *Timestamp) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	b = b[:cap(b)]
+	n, err := m.MarshalTo(b)
+	if err != nil {
+		return nil, err
+	}
+	return b[:n], nil
+}
+func (dst *Timestamp) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_Timestamp.Merge(dst, src)
+}
+func (m *Timestamp) XXX_Size() int {
+	return m.Size()
+}
+func (m *Timestamp) XXX_DiscardUnknown() {
+	xxx_messageInfo_Timestamp.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_Timestamp proto.InternalMessageInfo
 
 func init() {
 	proto.RegisterType((*Timestamp)(nil), "cockroach.util.hlc.Timestamp")
@@ -58,6 +119,9 @@ func (this *Timestamp) Equal(that interface{}) bool {
 	if this.Logical != that1.Logical {
 		return false
 	}
+	if this.Synthetic != that1.Synthetic {
+		return false
+	}
 	return true
 }
 func (m *Timestamp) Marshal() (dAtA []byte, err error) {
@@ -85,6 +149,16 @@ func (m *Timestamp) MarshalTo(dAtA []byte) (int, error) {
 		i++
 		i = encodeVarintTimestamp(dAtA, i, uint64(m.Logical))
 	}
+	if m.Synthetic {
+		dAtA[i] = 0x18
+		i++
+		if m.Synthetic {
+			dAtA[i] = 1
+		} else {
+			dAtA[i] = 0
+		}
+		i++
+	}
 	return i, nil
 }
 
@@ -107,6 +181,7 @@ func NewPopulatedTimestamp(r randyTimestamp, easy bool) *Timestamp {
 	if r.Intn(2) == 0 {
 		this.Logical *= -1
 	}
+	this.Synthetic = bool(bool(r.Intn(2) == 0))
 	if !easy && r.Intn(10) != 0 {
 	}
 	return this
@@ -185,6 +260,9 @@ func encodeVarintPopulateTimestamp(dAtA []byte, v uint64) []byte {
 	return dAtA
 }
 func (m *Timestamp) Size() (n int) {
+	if m == nil {
+		return 0
+	}
 	var l int
 	_ = l
 	if m.WallTime != 0 {
@@ -192,6 +270,9 @@ func (m *Timestamp) Size() (n int) {
 	}
 	if m.Logical != 0 {
 		n += 1 + sovTimestamp(uint64(m.Logical))
+	}
+	if m.Synthetic {
+		n += 2
 	}
 	return n
 }
@@ -276,13 +357,33 @@ func (m *Timestamp) Unmarshal(dAtA []byte) error {
 					break
 				}
 			}
+		case 3:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Synthetic", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowTimestamp
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.Synthetic = bool(v != 0)
 		default:
 			iNdEx = preIndex
 			skippy, err := skipTimestamp(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
-			if skippy < 0 {
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
 				return ErrInvalidLengthTimestamp
 			}
 			if (iNdEx + skippy) > l {
@@ -402,20 +503,24 @@ var (
 	ErrIntOverflowTimestamp   = fmt.Errorf("proto: integer overflow")
 )
 
-func init() { proto.RegisterFile("util/hlc/timestamp.proto", fileDescriptorTimestamp) }
+func init() {
+	proto.RegisterFile("util/hlc/timestamp.proto", fileDescriptor_timestamp_e3db50d085ffaa11)
+}
 
-var fileDescriptorTimestamp = []byte{
-	// 183 bytes of a gzipped FileDescriptorProto
+var fileDescriptor_timestamp_e3db50d085ffaa11 = []byte{
+	// 213 bytes of a gzipped FileDescriptorProto
 	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xe2, 0x92, 0x28, 0x2d, 0xc9, 0xcc,
 	0xd1, 0xcf, 0xc8, 0x49, 0xd6, 0x2f, 0xc9, 0xcc, 0x4d, 0x2d, 0x2e, 0x49, 0xcc, 0x2d, 0xd0, 0x2b,
 	0x28, 0xca, 0x2f, 0xc9, 0x17, 0x12, 0x4a, 0xce, 0x4f, 0xce, 0x2e, 0xca, 0x4f, 0x4c, 0xce, 0xd0,
 	0x03, 0xa9, 0xd1, 0xcb, 0xc8, 0x49, 0x96, 0x12, 0x49, 0xcf, 0x4f, 0xcf, 0x07, 0x4b, 0xeb, 0x83,
-	0x58, 0x10, 0x95, 0x4a, 0x01, 0x5c, 0x9c, 0x21, 0x30, 0xcd, 0x42, 0xd2, 0x5c, 0x9c, 0xe5, 0x89,
+	0x58, 0x10, 0x95, 0x4a, 0x79, 0x5c, 0x9c, 0x21, 0x30, 0xcd, 0x42, 0xd2, 0x5c, 0x9c, 0xe5, 0x89,
 	0x39, 0x39, 0xf1, 0x20, 0xe3, 0x24, 0x18, 0x15, 0x18, 0x35, 0x98, 0x83, 0x38, 0x40, 0x02, 0x20,
 	0x15, 0x42, 0x12, 0x5c, 0xec, 0x39, 0xf9, 0xe9, 0x99, 0xc9, 0x89, 0x39, 0x12, 0x4c, 0x0a, 0x8c,
-	0x1a, 0xac, 0x41, 0x30, 0xae, 0x15, 0xcf, 0x8c, 0x05, 0xf2, 0x0c, 0x3b, 0x16, 0xc8, 0x33, 0xbe,
-	0x58, 0x20, 0xcf, 0xe8, 0x24, 0x7b, 0xe2, 0xa1, 0x1c, 0xc3, 0x89, 0x47, 0x72, 0x8c, 0x17, 0x1e,
-	0xc9, 0x31, 0xde, 0x78, 0x24, 0xc7, 0xf8, 0xe0, 0x91, 0x1c, 0xe3, 0x84, 0xc7, 0x72, 0x0c, 0x51,
-	0xcc, 0x19, 0x39, 0xc9, 0x49, 0x6c, 0x60, 0x7b, 0x8d, 0x01, 0x01, 0x00, 0x00, 0xff, 0xff, 0x22,
-	0x25, 0xdd, 0x1a, 0xbd, 0x00, 0x00, 0x00,
+	0x1a, 0xac, 0x41, 0x30, 0xae, 0x90, 0x0c, 0x17, 0x67, 0x71, 0x65, 0x5e, 0x49, 0x46, 0x6a, 0x49,
+	0x66, 0xb2, 0x04, 0xb3, 0x02, 0xa3, 0x06, 0x47, 0x10, 0x42, 0xc0, 0x8a, 0x67, 0xc6, 0x02, 0x79,
+	0x86, 0x1d, 0x0b, 0xe4, 0x19, 0x5f, 0x2c, 0x90, 0x67, 0x74, 0x52, 0x3d, 0xf1, 0x50, 0x8e, 0xe1,
+	0xc4, 0x23, 0x39, 0xc6, 0x0b, 0x8f, 0xe4, 0x18, 0x6f, 0x3c, 0x92, 0x63, 0x7c, 0xf0, 0x48, 0x8e,
+	0x71, 0xc2, 0x63, 0x39, 0x86, 0x0b, 0x8f, 0xe5, 0x18, 0x6e, 0x3c, 0x96, 0x63, 0x88, 0x62, 0xce,
+	0xc8, 0x49, 0x4e, 0x62, 0x03, 0xbb, 0xce, 0x18, 0x10, 0x00, 0x00, 0xff, 0xff, 0xa2, 0x14, 0x0e,
+	0x21, 0xe3, 0x00, 0x00, 0x00,
 }

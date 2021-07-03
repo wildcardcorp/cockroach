@@ -1,16 +1,12 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 import _ from "lodash";
 import Long from "long";
@@ -31,7 +27,9 @@ export function PrintReplicaID(
   replicaID?: Long,
 ) {
   if (!_.isNil(rep)) {
-    return `n${rep.node_id} s${rep.store_id} r${rangeID.toString()}/${rep.replica_id}`;
+    return `n${rep.node_id} s${rep.store_id} r${rangeID.toString()}/${
+      rep.replica_id
+    }`;
   }
   // Fall back to the passed in node, store and replica IDs. If those are nil,
   // use a question mark instead.
@@ -46,14 +44,17 @@ export function PrintTime(time: moment.Moment) {
 }
 
 export function PrintTimestamp(
-  timestamp: protos.cockroach.util.hlc.ITimestamp |
-    protos.google.protobuf.ITimestamp,
+  timestamp:
+    | protos.cockroach.util.hlc.ITimestamp
+    | protos.google.protobuf.ITimestamp,
 ) {
   let time: moment.Moment = null;
   if (_.has(timestamp, "wall_time")) {
-    time = LongToMoment((timestamp as protos.cockroach.util.hlc.ITimestamp).wall_time);
+    time = LongToMoment(
+      (timestamp as protos.cockroach.util.hlc.ITimestamp).wall_time,
+    );
   } else if (_.has(timestamp, "seconds") || _.has(timestamp, "nanos")) {
-    time = TimestampToMoment((timestamp as protos.google.protobuf.ITimestamp));
+    time = TimestampToMoment(timestamp as protos.google.protobuf.ITimestamp);
   } else {
     return "";
   }

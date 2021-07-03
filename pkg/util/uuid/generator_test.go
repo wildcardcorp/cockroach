@@ -1,3 +1,13 @@
+// Copyright 2019 The Cockroach Authors.
+//
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
+
 // Copyright (C) 2013-2018 by Maxim Bublis <b@codemonkey.ru>
 // Use of this source code is governed by a MIT-style
 // license that can be found in licenses/MIT-gofrs.txt.
@@ -312,22 +322,27 @@ func testNewV5DifferentNamespaces(t *testing.T) {
 }
 
 func BenchmarkGenerator(b *testing.B) {
-	b.Run("NewV1", func(b *testing.B) {
+	b.Run("V1", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			Must(NewV1())
 		}
 	})
-	b.Run("NewV3", func(b *testing.B) {
+	b.Run("V3", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			NewV3(NamespaceDNS, "www.example.com")
 		}
 	})
-	b.Run("NewV4", func(b *testing.B) {
+	b.Run("V4", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			Must(NewV4())
 		}
 	})
-	b.Run("NewV5", func(b *testing.B) {
+	b.Run("FastV4", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			FastMakeV4()
+		}
+	})
+	b.Run("V5", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			NewV5(NamespaceDNS, "www.example.com")
 		}

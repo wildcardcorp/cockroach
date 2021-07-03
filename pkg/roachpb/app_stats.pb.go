@@ -7,7 +7,10 @@ import proto "github.com/gogo/protobuf/proto"
 import fmt "fmt"
 import math "math"
 
-import binary "encoding/binary"
+import time "time"
+
+import encoding_binary "encoding/binary"
+import github_com_gogo_protobuf_types "github.com/gogo/protobuf/types"
 
 import io "io"
 
@@ -15,7 +18,20 @@ import io "io"
 var _ = proto.Marshal
 var _ = fmt.Errorf
 var _ = math.Inf
+var _ = time.Kitchen
 
+// This is a compile-time assertion to ensure that this generated file
+// is compatible with the proto package it is being compiled against.
+// A compilation error at this line likely means your copy of the
+// proto package needs to be updated.
+const _ = proto.GoGoProtoPackageIsVersion2 // please upgrade the proto package
+
+// StatementStatistics represent the statement statistics sent to the DB
+// Console for a given statement fingerprint. Note that these stats are cleared
+// ever diagnostics.sql_stat_reset_interval.
+// N.B. When fields are added to this struct, make sure to update
+// (*StatementStatistics).Add and (*StatementStatistics).AlmostEqual
+// in app_stats.go.
 type StatementStatistics struct {
 	// Count is the total number of times this statement was executed
 	// since the begin of the reporting period.
@@ -40,10 +56,11 @@ type StatementStatistics struct {
 	// When transmitted to the reporting server, this value gets
 	// quantized into buckets (few <10, dozens 10+, 100 or more).
 	MaxRetries int64 `protobuf:"varint,3,opt,name=max_retries,json=maxRetries" json:"max_retries"`
-	// LastErr collects the last error encountered.
-	LastErr string `protobuf:"bytes,4,opt,name=last_err,json=lastErr" json:"last_err"`
-	// LastErrRedacted collects the last error, redacted for reporting.
-	LastErrRedacted string `protobuf:"bytes,11,opt,name=last_err_redacted,json=lastErrRedacted" json:"last_err_redacted"`
+	// DEPRECATED: LastErr collects the last error encountered.
+	// Use sensitive_info.last_err instead.
+	LegacyLastErr string `protobuf:"bytes,4,opt,name=legacy_last_err,json=legacyLastErr" json:"legacy_last_err"`
+	// DEPRECATED: LastErrRedacted collects the last error, redacted for reporting.
+	LegacyLastErrRedacted string `protobuf:"bytes,11,opt,name=legacy_last_err_redacted,json=legacyLastErrRedacted" json:"legacy_last_err_redacted"`
 	// NumRows collects the number of rows returned or observed.
 	NumRows NumericStat `protobuf:"bytes,5,opt,name=num_rows,json=numRows" json:"num_rows"`
 	// ParseLat is the time to transform the SQL string into an AST.
@@ -58,13 +75,146 @@ type StatementStatistics struct {
 	// We store it separately (as opposed to computing it post-hoc) because the combined
 	// variance for the overhead cannot be derived from the variance of the separate latencies.
 	OverheadLat NumericStat `protobuf:"bytes,10,opt,name=overhead_lat,json=overheadLat" json:"overhead_lat"`
+	// SensitiveInfo is info that needs to be scrubbed or redacted before being
+	// sent to the reg cluster.
+	SensitiveInfo SensitiveInfo `protobuf:"bytes,12,opt,name=sensitive_info,json=sensitiveInfo" json:"sensitive_info"`
+	// BytesRead collects the number of bytes read from disk.
+	BytesRead NumericStat `protobuf:"bytes,15,opt,name=bytes_read,json=bytesRead" json:"bytes_read"`
+	// RowsRead collects the number of rows read from disk.
+	RowsRead NumericStat `protobuf:"bytes,16,opt,name=rows_read,json=rowsRead" json:"rows_read"`
+	// ExecStats are the execution statistics for this statement. These statistics
+	// are sampled.
+	ExecStats ExecStats `protobuf:"bytes,21,opt,name=exec_stats,json=execStats" json:"exec_stats"`
 }
 
-func (m *StatementStatistics) Reset()                    { *m = StatementStatistics{} }
-func (m *StatementStatistics) String() string            { return proto.CompactTextString(m) }
-func (*StatementStatistics) ProtoMessage()               {}
-func (*StatementStatistics) Descriptor() ([]byte, []int) { return fileDescriptorAppStats, []int{0} }
+func (m *StatementStatistics) Reset()         { *m = StatementStatistics{} }
+func (m *StatementStatistics) String() string { return proto.CompactTextString(m) }
+func (*StatementStatistics) ProtoMessage()    {}
+func (*StatementStatistics) Descriptor() ([]byte, []int) {
+	return fileDescriptor_app_stats_34443f9da23633b4, []int{0}
+}
+func (m *StatementStatistics) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *StatementStatistics) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	b = b[:cap(b)]
+	n, err := m.MarshalTo(b)
+	if err != nil {
+		return nil, err
+	}
+	return b[:n], nil
+}
+func (dst *StatementStatistics) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_StatementStatistics.Merge(dst, src)
+}
+func (m *StatementStatistics) XXX_Size() int {
+	return m.Size()
+}
+func (m *StatementStatistics) XXX_DiscardUnknown() {
+	xxx_messageInfo_StatementStatistics.DiscardUnknown(m)
+}
 
+var xxx_messageInfo_StatementStatistics proto.InternalMessageInfo
+
+type TransactionStatistics struct {
+	// Count is the total number of times this transaction was executed
+	// since the beginning of the reporting period.
+	Count int64 `protobuf:"varint,1,opt,name=count" json:"count"`
+	// MaxRetries collects the maximum observed number of automatic
+	// retries in the reporting period.
+	MaxRetries int64 `protobuf:"varint,2,opt,name=max_retries,json=maxRetries" json:"max_retries"`
+	// NumRows collects the total number of rows returned, observed or affected
+	// across all statements.
+	NumRows NumericStat `protobuf:"bytes,3,opt,name=num_rows,json=numRows" json:"num_rows"`
+	// ServiceLat is the time to service the transaction, from the time a
+	// transaction was received to end of execution.
+	ServiceLat NumericStat `protobuf:"bytes,4,opt,name=service_lat,json=serviceLat" json:"service_lat"`
+	// RetryLat is the amount of time spent retrying the transaction.
+	RetryLat NumericStat `protobuf:"bytes,5,opt,name=retry_lat,json=retryLat" json:"retry_lat"`
+	// CommitLat is the amount of time required to commit the transaction after
+	// all statement operations have been applied.
+	CommitLat NumericStat `protobuf:"bytes,6,opt,name=commit_lat,json=commitLat" json:"commit_lat"`
+	// BytesRead collects the number of bytes read from disk.
+	BytesRead NumericStat `protobuf:"bytes,7,opt,name=bytes_read,json=bytesRead" json:"bytes_read"`
+	// RowsRead collects the number of rows read from disk.
+	RowsRead NumericStat `protobuf:"bytes,8,opt,name=rows_read,json=rowsRead" json:"rows_read"`
+	// ExecStats are the execution statistics for this transaction, i.e. an
+	// aggregation of all its statements' execution statistics. These statistics
+	// are sampled.
+	ExecStats ExecStats `protobuf:"bytes,9,opt,name=exec_stats,json=execStats" json:"exec_stats"`
+}
+
+func (m *TransactionStatistics) Reset()         { *m = TransactionStatistics{} }
+func (m *TransactionStatistics) String() string { return proto.CompactTextString(m) }
+func (*TransactionStatistics) ProtoMessage()    {}
+func (*TransactionStatistics) Descriptor() ([]byte, []int) {
+	return fileDescriptor_app_stats_34443f9da23633b4, []int{1}
+}
+func (m *TransactionStatistics) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *TransactionStatistics) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	b = b[:cap(b)]
+	n, err := m.MarshalTo(b)
+	if err != nil {
+		return nil, err
+	}
+	return b[:n], nil
+}
+func (dst *TransactionStatistics) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_TransactionStatistics.Merge(dst, src)
+}
+func (m *TransactionStatistics) XXX_Size() int {
+	return m.Size()
+}
+func (m *TransactionStatistics) XXX_DiscardUnknown() {
+	xxx_messageInfo_TransactionStatistics.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_TransactionStatistics proto.InternalMessageInfo
+
+type SensitiveInfo struct {
+	// LastErr collects the last error encountered.
+	// It is only reported once it's been redacted.
+	// See also: https://github.com/cockroachdb/cockroach/issues/53191
+	LastErr string `protobuf:"bytes,1,opt,name=last_err,json=lastErr" json:"last_err"`
+	// MostRecentPlanDescription is a serialized representation of the logical plan most recently captured for this query.
+	MostRecentPlanDescription ExplainTreePlanNode `protobuf:"bytes,2,opt,name=most_recent_plan_description,json=mostRecentPlanDescription" json:"most_recent_plan_description"`
+	// Timestamp is the time at which the logical plan was last sampled.
+	MostRecentPlanTimestamp time.Time `protobuf:"bytes,3,opt,name=most_recent_plan_timestamp,json=mostRecentPlanTimestamp,stdtime" json:"most_recent_plan_timestamp"`
+}
+
+func (m *SensitiveInfo) Reset()         { *m = SensitiveInfo{} }
+func (m *SensitiveInfo) String() string { return proto.CompactTextString(m) }
+func (*SensitiveInfo) ProtoMessage()    {}
+func (*SensitiveInfo) Descriptor() ([]byte, []int) {
+	return fileDescriptor_app_stats_34443f9da23633b4, []int{2}
+}
+func (m *SensitiveInfo) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *SensitiveInfo) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	b = b[:cap(b)]
+	n, err := m.MarshalTo(b)
+	if err != nil {
+		return nil, err
+	}
+	return b[:n], nil
+}
+func (dst *SensitiveInfo) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_SensitiveInfo.Merge(dst, src)
+}
+func (m *SensitiveInfo) XXX_Size() int {
+	return m.Size()
+}
+func (m *SensitiveInfo) XXX_DiscardUnknown() {
+	xxx_messageInfo_SensitiveInfo.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_SensitiveInfo proto.InternalMessageInfo
+
+// N.B. When this changes, make sure to update (*NumericStat).AlmostEqual
+// in app_stats.go.
 type NumericStat struct {
 	// NumericStat keeps track of two running values --- the running mean and
 	// the running sum of squared differences from the mean. Using this along
@@ -76,26 +226,82 @@ type NumericStat struct {
 	SquaredDiffs float64 `protobuf:"fixed64,2,opt,name=squared_diffs,json=squaredDiffs" json:"squared_diffs"`
 }
 
-func (m *NumericStat) Reset()                    { *m = NumericStat{} }
-func (m *NumericStat) String() string            { return proto.CompactTextString(m) }
-func (*NumericStat) ProtoMessage()               {}
-func (*NumericStat) Descriptor() ([]byte, []int) { return fileDescriptorAppStats, []int{1} }
-
-type StatementStatisticsKey struct {
-	Query   string `protobuf:"bytes,1,opt,name=query" json:"query"`
-	App     string `protobuf:"bytes,2,opt,name=app" json:"app"`
-	DistSQL bool   `protobuf:"varint,3,opt,name=distSQL" json:"distSQL"`
-	Failed  bool   `protobuf:"varint,4,opt,name=failed" json:"failed"`
-	Opt     bool   `protobuf:"varint,5,opt,name=opt" json:"opt"`
+func (m *NumericStat) Reset()         { *m = NumericStat{} }
+func (m *NumericStat) String() string { return proto.CompactTextString(m) }
+func (*NumericStat) ProtoMessage()    {}
+func (*NumericStat) Descriptor() ([]byte, []int) {
+	return fileDescriptor_app_stats_34443f9da23633b4, []int{3}
+}
+func (m *NumericStat) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *NumericStat) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	b = b[:cap(b)]
+	n, err := m.MarshalTo(b)
+	if err != nil {
+		return nil, err
+	}
+	return b[:n], nil
+}
+func (dst *NumericStat) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_NumericStat.Merge(dst, src)
+}
+func (m *NumericStat) XXX_Size() int {
+	return m.Size()
+}
+func (m *NumericStat) XXX_DiscardUnknown() {
+	xxx_messageInfo_NumericStat.DiscardUnknown(m)
 }
 
-func (m *StatementStatisticsKey) Reset()                    { *m = StatementStatisticsKey{} }
-func (m *StatementStatisticsKey) String() string            { return proto.CompactTextString(m) }
-func (*StatementStatisticsKey) ProtoMessage()               {}
-func (*StatementStatisticsKey) Descriptor() ([]byte, []int) { return fileDescriptorAppStats, []int{2} }
+var xxx_messageInfo_NumericStat proto.InternalMessageInfo
 
-// CollectedStats wraps collected timings and metadata for some query's execution.
+type StatementStatisticsKey struct {
+	Query       string `protobuf:"bytes,1,opt,name=query" json:"query"`
+	App         string `protobuf:"bytes,2,opt,name=app" json:"app"`
+	DistSQL     bool   `protobuf:"varint,3,opt,name=distSQL" json:"distSQL"`
+	Failed      bool   `protobuf:"varint,4,opt,name=failed" json:"failed"`
+	Opt         bool   `protobuf:"varint,5,opt,name=opt" json:"opt"`
+	ImplicitTxn bool   `protobuf:"varint,6,opt,name=implicit_txn,json=implicitTxn" json:"implicit_txn"`
+	Vec         bool   `protobuf:"varint,7,opt,name=vec" json:"vec"`
+	FullScan    bool   `protobuf:"varint,8,opt,name=full_scan,json=fullScan" json:"full_scan"`
+}
+
+func (m *StatementStatisticsKey) Reset()         { *m = StatementStatisticsKey{} }
+func (m *StatementStatisticsKey) String() string { return proto.CompactTextString(m) }
+func (*StatementStatisticsKey) ProtoMessage()    {}
+func (*StatementStatisticsKey) Descriptor() ([]byte, []int) {
+	return fileDescriptor_app_stats_34443f9da23633b4, []int{4}
+}
+func (m *StatementStatisticsKey) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *StatementStatisticsKey) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	b = b[:cap(b)]
+	n, err := m.MarshalTo(b)
+	if err != nil {
+		return nil, err
+	}
+	return b[:n], nil
+}
+func (dst *StatementStatisticsKey) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_StatementStatisticsKey.Merge(dst, src)
+}
+func (m *StatementStatisticsKey) XXX_Size() int {
+	return m.Size()
+}
+func (m *StatementStatisticsKey) XXX_DiscardUnknown() {
+	xxx_messageInfo_StatementStatisticsKey.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_StatementStatisticsKey proto.InternalMessageInfo
+
+// CollectedStatementStatistics wraps collected timings and metadata for some
+// query's execution.
 type CollectedStatementStatistics struct {
+	// ID is a hash of the statement key (query fingerprint, failure status,
+	// implicit txn or not) which can be used to identify the statement
+	// for instance in transaction statistics.
+	ID    StmtID                 `protobuf:"varint,3,opt,name=id,casttype=StmtID" json:"id"`
 	Key   StatementStatisticsKey `protobuf:"bytes,1,opt,name=key" json:"key"`
 	Stats StatementStatistics    `protobuf:"bytes,2,opt,name=stats" json:"stats"`
 }
@@ -104,14 +310,345 @@ func (m *CollectedStatementStatistics) Reset()         { *m = CollectedStatement
 func (m *CollectedStatementStatistics) String() string { return proto.CompactTextString(m) }
 func (*CollectedStatementStatistics) ProtoMessage()    {}
 func (*CollectedStatementStatistics) Descriptor() ([]byte, []int) {
-	return fileDescriptorAppStats, []int{3}
+	return fileDescriptor_app_stats_34443f9da23633b4, []int{5}
 }
+func (m *CollectedStatementStatistics) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *CollectedStatementStatistics) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	b = b[:cap(b)]
+	n, err := m.MarshalTo(b)
+	if err != nil {
+		return nil, err
+	}
+	return b[:n], nil
+}
+func (dst *CollectedStatementStatistics) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_CollectedStatementStatistics.Merge(dst, src)
+}
+func (m *CollectedStatementStatistics) XXX_Size() int {
+	return m.Size()
+}
+func (m *CollectedStatementStatistics) XXX_DiscardUnknown() {
+	xxx_messageInfo_CollectedStatementStatistics.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_CollectedStatementStatistics proto.InternalMessageInfo
+
+// CollectedTransactionStatistics wraps collected timings and metadata for some
+// transaction executions.
+type CollectedTransactionStatistics struct {
+	// StatementIDs is the IDs of the statements which this transaction comprises,
+	// in order.
+	StatementIDs []StmtID `protobuf:"varint,1,rep,name=statement_ids,json=statementIds,casttype=StmtID" json:"statement_ids,omitempty"`
+	// App is the name of the app which executed the transaction.
+	App   string                `protobuf:"bytes,2,opt,name=app" json:"app"`
+	Stats TransactionStatistics `protobuf:"bytes,3,opt,name=stats" json:"stats"`
+}
+
+func (m *CollectedTransactionStatistics) Reset()         { *m = CollectedTransactionStatistics{} }
+func (m *CollectedTransactionStatistics) String() string { return proto.CompactTextString(m) }
+func (*CollectedTransactionStatistics) ProtoMessage()    {}
+func (*CollectedTransactionStatistics) Descriptor() ([]byte, []int) {
+	return fileDescriptor_app_stats_34443f9da23633b4, []int{6}
+}
+func (m *CollectedTransactionStatistics) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *CollectedTransactionStatistics) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	b = b[:cap(b)]
+	n, err := m.MarshalTo(b)
+	if err != nil {
+		return nil, err
+	}
+	return b[:n], nil
+}
+func (dst *CollectedTransactionStatistics) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_CollectedTransactionStatistics.Merge(dst, src)
+}
+func (m *CollectedTransactionStatistics) XXX_Size() int {
+	return m.Size()
+}
+func (m *CollectedTransactionStatistics) XXX_DiscardUnknown() {
+	xxx_messageInfo_CollectedTransactionStatistics.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_CollectedTransactionStatistics proto.InternalMessageInfo
+
+// ExplainTreePlanNode is a serialized representation of an EXPLAIN tree for a logical plan.
+type ExplainTreePlanNode struct {
+	// Name is the type of node this is, e.g. "scan" or "index-join".
+	Name string `protobuf:"bytes,1,opt,name=name" json:"name"`
+	// Attrs are attributes of this plan node.
+	// Often there are many attributes with the same key, e.g. "render".
+	Attrs []*ExplainTreePlanNode_Attr `protobuf:"bytes,2,rep,name=attrs" json:"attrs,omitempty"`
+	// Children are the nodes that feed into this one, e.g. two scans for a join.
+	Children []*ExplainTreePlanNode `protobuf:"bytes,3,rep,name=children" json:"children,omitempty"`
+}
+
+func (m *ExplainTreePlanNode) Reset()         { *m = ExplainTreePlanNode{} }
+func (m *ExplainTreePlanNode) String() string { return proto.CompactTextString(m) }
+func (*ExplainTreePlanNode) ProtoMessage()    {}
+func (*ExplainTreePlanNode) Descriptor() ([]byte, []int) {
+	return fileDescriptor_app_stats_34443f9da23633b4, []int{7}
+}
+func (m *ExplainTreePlanNode) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *ExplainTreePlanNode) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	b = b[:cap(b)]
+	n, err := m.MarshalTo(b)
+	if err != nil {
+		return nil, err
+	}
+	return b[:n], nil
+}
+func (dst *ExplainTreePlanNode) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_ExplainTreePlanNode.Merge(dst, src)
+}
+func (m *ExplainTreePlanNode) XXX_Size() int {
+	return m.Size()
+}
+func (m *ExplainTreePlanNode) XXX_DiscardUnknown() {
+	xxx_messageInfo_ExplainTreePlanNode.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_ExplainTreePlanNode proto.InternalMessageInfo
+
+type ExplainTreePlanNode_Attr struct {
+	Key   string `protobuf:"bytes,1,opt,name=key" json:"key"`
+	Value string `protobuf:"bytes,2,opt,name=value" json:"value"`
+}
+
+func (m *ExplainTreePlanNode_Attr) Reset()         { *m = ExplainTreePlanNode_Attr{} }
+func (m *ExplainTreePlanNode_Attr) String() string { return proto.CompactTextString(m) }
+func (*ExplainTreePlanNode_Attr) ProtoMessage()    {}
+func (*ExplainTreePlanNode_Attr) Descriptor() ([]byte, []int) {
+	return fileDescriptor_app_stats_34443f9da23633b4, []int{7, 0}
+}
+func (m *ExplainTreePlanNode_Attr) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *ExplainTreePlanNode_Attr) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	b = b[:cap(b)]
+	n, err := m.MarshalTo(b)
+	if err != nil {
+		return nil, err
+	}
+	return b[:n], nil
+}
+func (dst *ExplainTreePlanNode_Attr) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_ExplainTreePlanNode_Attr.Merge(dst, src)
+}
+func (m *ExplainTreePlanNode_Attr) XXX_Size() int {
+	return m.Size()
+}
+func (m *ExplainTreePlanNode_Attr) XXX_DiscardUnknown() {
+	xxx_messageInfo_ExplainTreePlanNode_Attr.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_ExplainTreePlanNode_Attr proto.InternalMessageInfo
+
+// TxnStats contains statistics about transactions of one application.
+// N.B. When field are added to this struct, make sure to updated
+// (*TxnStats).Add in app_stats.go.
+type TxnStats struct {
+	TxnCount       int64       `protobuf:"varint,1,opt,name=txn_count,json=txnCount" json:"txn_count"`
+	TxnTimeSec     NumericStat `protobuf:"bytes,2,opt,name=txn_time_sec,json=txnTimeSec" json:"txn_time_sec"`
+	CommittedCount int64       `protobuf:"varint,3,opt,name=committed_count,json=committedCount" json:"committed_count"`
+	ImplicitCount  int64       `protobuf:"varint,4,opt,name=implicit_count,json=implicitCount" json:"implicit_count"`
+}
+
+func (m *TxnStats) Reset()         { *m = TxnStats{} }
+func (m *TxnStats) String() string { return proto.CompactTextString(m) }
+func (*TxnStats) ProtoMessage()    {}
+func (*TxnStats) Descriptor() ([]byte, []int) {
+	return fileDescriptor_app_stats_34443f9da23633b4, []int{8}
+}
+func (m *TxnStats) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *TxnStats) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	b = b[:cap(b)]
+	n, err := m.MarshalTo(b)
+	if err != nil {
+		return nil, err
+	}
+	return b[:n], nil
+}
+func (dst *TxnStats) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_TxnStats.Merge(dst, src)
+}
+func (m *TxnStats) XXX_Size() int {
+	return m.Size()
+}
+func (m *TxnStats) XXX_DiscardUnknown() {
+	xxx_messageInfo_TxnStats.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_TxnStats proto.InternalMessageInfo
+
+// ExecStats contains execution statistics that apply to both statements
+// and transactions. These stats are currently collected using a sampling
+// approach.
+type ExecStats struct {
+	// Count keeps track of how many times execution stats were recorded. This is
+	// not necessarily equal to the number of times a statement/transaction was
+	// run.
+	Count int64 `protobuf:"varint,1,opt,name=count" json:"count"`
+	// NetworkBytes collects the number of bytes sent over the network.
+	NetworkBytes NumericStat `protobuf:"bytes,2,opt,name=network_bytes,json=networkBytes" json:"network_bytes"`
+	// MaxMemUsage collects the maximum memory usage that occurred on a node.
+	MaxMemUsage NumericStat `protobuf:"bytes,3,opt,name=max_mem_usage,json=maxMemUsage" json:"max_mem_usage"`
+	// ContentionTime collects the time this statement spent contending.
+	ContentionTime NumericStat `protobuf:"bytes,4,opt,name=contention_time,json=contentionTime" json:"contention_time"`
+	// NetworkMessages collects the number of messages that were sent over the
+	// network.
+	NetworkMessages NumericStat `protobuf:"bytes,5,opt,name=network_messages,json=networkMessages" json:"network_messages"`
+	// MaxDiskUsage collects the maximum temporary disk usage that occurred. This
+	// is set in cases where a query had to spill to disk, e.g. when performing a
+	// large sort where not all of the tuples fit in memory.
+	MaxDiskUsage NumericStat `protobuf:"bytes,6,opt,name=max_disk_usage,json=maxDiskUsage" json:"max_disk_usage"`
+}
+
+func (m *ExecStats) Reset()         { *m = ExecStats{} }
+func (m *ExecStats) String() string { return proto.CompactTextString(m) }
+func (*ExecStats) ProtoMessage()    {}
+func (*ExecStats) Descriptor() ([]byte, []int) {
+	return fileDescriptor_app_stats_34443f9da23633b4, []int{9}
+}
+func (m *ExecStats) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *ExecStats) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	b = b[:cap(b)]
+	n, err := m.MarshalTo(b)
+	if err != nil {
+		return nil, err
+	}
+	return b[:n], nil
+}
+func (dst *ExecStats) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_ExecStats.Merge(dst, src)
+}
+func (m *ExecStats) XXX_Size() int {
+	return m.Size()
+}
+func (m *ExecStats) XXX_DiscardUnknown() {
+	xxx_messageInfo_ExecStats.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_ExecStats proto.InternalMessageInfo
 
 func init() {
 	proto.RegisterType((*StatementStatistics)(nil), "cockroach.sql.StatementStatistics")
+	proto.RegisterType((*TransactionStatistics)(nil), "cockroach.sql.TransactionStatistics")
+	proto.RegisterType((*SensitiveInfo)(nil), "cockroach.sql.SensitiveInfo")
 	proto.RegisterType((*NumericStat)(nil), "cockroach.sql.NumericStat")
 	proto.RegisterType((*StatementStatisticsKey)(nil), "cockroach.sql.StatementStatisticsKey")
 	proto.RegisterType((*CollectedStatementStatistics)(nil), "cockroach.sql.CollectedStatementStatistics")
+	proto.RegisterType((*CollectedTransactionStatistics)(nil), "cockroach.sql.CollectedTransactionStatistics")
+	proto.RegisterType((*ExplainTreePlanNode)(nil), "cockroach.sql.ExplainTreePlanNode")
+	proto.RegisterType((*ExplainTreePlanNode_Attr)(nil), "cockroach.sql.ExplainTreePlanNode.Attr")
+	proto.RegisterType((*TxnStats)(nil), "cockroach.sql.TxnStats")
+	proto.RegisterType((*ExecStats)(nil), "cockroach.sql.ExecStats")
+}
+func (this *SensitiveInfo) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*SensitiveInfo)
+	if !ok {
+		that2, ok := that.(SensitiveInfo)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	if this.LastErr != that1.LastErr {
+		return false
+	}
+	if !this.MostRecentPlanDescription.Equal(&that1.MostRecentPlanDescription) {
+		return false
+	}
+	if !this.MostRecentPlanTimestamp.Equal(that1.MostRecentPlanTimestamp) {
+		return false
+	}
+	return true
+}
+func (this *ExplainTreePlanNode) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*ExplainTreePlanNode)
+	if !ok {
+		that2, ok := that.(ExplainTreePlanNode)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	if this.Name != that1.Name {
+		return false
+	}
+	if len(this.Attrs) != len(that1.Attrs) {
+		return false
+	}
+	for i := range this.Attrs {
+		if !this.Attrs[i].Equal(that1.Attrs[i]) {
+			return false
+		}
+	}
+	if len(this.Children) != len(that1.Children) {
+		return false
+	}
+	for i := range this.Children {
+		if !this.Children[i].Equal(that1.Children[i]) {
+			return false
+		}
+	}
+	return true
+}
+func (this *ExplainTreePlanNode_Attr) Equal(that interface{}) bool {
+	if that == nil {
+		return this == nil
+	}
+
+	that1, ok := that.(*ExplainTreePlanNode_Attr)
+	if !ok {
+		that2, ok := that.(ExplainTreePlanNode_Attr)
+		if ok {
+			that1 = &that2
+		} else {
+			return false
+		}
+	}
+	if that1 == nil {
+		return this == nil
+	} else if this == nil {
+		return false
+	}
+	if this.Key != that1.Key {
+		return false
+	}
+	if this.Value != that1.Value {
+		return false
+	}
+	return true
 }
 func (m *StatementStatistics) Marshal() (dAtA []byte, err error) {
 	size := m.Size()
@@ -139,8 +676,8 @@ func (m *StatementStatistics) MarshalTo(dAtA []byte) (int, error) {
 	i = encodeVarintAppStats(dAtA, i, uint64(m.MaxRetries))
 	dAtA[i] = 0x22
 	i++
-	i = encodeVarintAppStats(dAtA, i, uint64(len(m.LastErr)))
-	i += copy(dAtA[i:], m.LastErr)
+	i = encodeVarintAppStats(dAtA, i, uint64(len(m.LegacyLastErr)))
+	i += copy(dAtA[i:], m.LegacyLastErr)
 	dAtA[i] = 0x2a
 	i++
 	i = encodeVarintAppStats(dAtA, i, uint64(m.NumRows.Size()))
@@ -191,8 +728,162 @@ func (m *StatementStatistics) MarshalTo(dAtA []byte) (int, error) {
 	i += n6
 	dAtA[i] = 0x5a
 	i++
-	i = encodeVarintAppStats(dAtA, i, uint64(len(m.LastErrRedacted)))
-	i += copy(dAtA[i:], m.LastErrRedacted)
+	i = encodeVarintAppStats(dAtA, i, uint64(len(m.LegacyLastErrRedacted)))
+	i += copy(dAtA[i:], m.LegacyLastErrRedacted)
+	dAtA[i] = 0x62
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(m.SensitiveInfo.Size()))
+	n7, err := m.SensitiveInfo.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n7
+	dAtA[i] = 0x7a
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(m.BytesRead.Size()))
+	n8, err := m.BytesRead.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n8
+	dAtA[i] = 0x82
+	i++
+	dAtA[i] = 0x1
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(m.RowsRead.Size()))
+	n9, err := m.RowsRead.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n9
+	dAtA[i] = 0xaa
+	i++
+	dAtA[i] = 0x1
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(m.ExecStats.Size()))
+	n10, err := m.ExecStats.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n10
+	return i, nil
+}
+
+func (m *TransactionStatistics) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *TransactionStatistics) MarshalTo(dAtA []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	dAtA[i] = 0x8
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(m.Count))
+	dAtA[i] = 0x10
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(m.MaxRetries))
+	dAtA[i] = 0x1a
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(m.NumRows.Size()))
+	n11, err := m.NumRows.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n11
+	dAtA[i] = 0x22
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(m.ServiceLat.Size()))
+	n12, err := m.ServiceLat.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n12
+	dAtA[i] = 0x2a
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(m.RetryLat.Size()))
+	n13, err := m.RetryLat.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n13
+	dAtA[i] = 0x32
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(m.CommitLat.Size()))
+	n14, err := m.CommitLat.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n14
+	dAtA[i] = 0x3a
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(m.BytesRead.Size()))
+	n15, err := m.BytesRead.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n15
+	dAtA[i] = 0x42
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(m.RowsRead.Size()))
+	n16, err := m.RowsRead.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n16
+	dAtA[i] = 0x4a
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(m.ExecStats.Size()))
+	n17, err := m.ExecStats.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n17
+	return i, nil
+}
+
+func (m *SensitiveInfo) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *SensitiveInfo) MarshalTo(dAtA []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	dAtA[i] = 0xa
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(len(m.LastErr)))
+	i += copy(dAtA[i:], m.LastErr)
+	dAtA[i] = 0x12
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(m.MostRecentPlanDescription.Size()))
+	n18, err := m.MostRecentPlanDescription.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n18
+	dAtA[i] = 0x1a
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(github_com_gogo_protobuf_types.SizeOfStdTime(m.MostRecentPlanTimestamp)))
+	n19, err := github_com_gogo_protobuf_types.StdTimeMarshalTo(m.MostRecentPlanTimestamp, dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n19
 	return i, nil
 }
 
@@ -213,11 +904,11 @@ func (m *NumericStat) MarshalTo(dAtA []byte) (int, error) {
 	_ = l
 	dAtA[i] = 0x9
 	i++
-	binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.Mean))))
+	encoding_binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.Mean))))
 	i += 8
 	dAtA[i] = 0x11
 	i++
-	binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.SquaredDiffs))))
+	encoding_binary.LittleEndian.PutUint64(dAtA[i:], uint64(math.Float64bits(float64(m.SquaredDiffs))))
 	i += 8
 	return i, nil
 }
@@ -269,6 +960,30 @@ func (m *StatementStatisticsKey) MarshalTo(dAtA []byte) (int, error) {
 		dAtA[i] = 0
 	}
 	i++
+	dAtA[i] = 0x30
+	i++
+	if m.ImplicitTxn {
+		dAtA[i] = 1
+	} else {
+		dAtA[i] = 0
+	}
+	i++
+	dAtA[i] = 0x38
+	i++
+	if m.Vec {
+		dAtA[i] = 1
+	} else {
+		dAtA[i] = 0
+	}
+	i++
+	dAtA[i] = 0x40
+	i++
+	if m.FullScan {
+		dAtA[i] = 1
+	} else {
+		dAtA[i] = 0
+	}
+	i++
 	return i, nil
 }
 
@@ -290,19 +1005,227 @@ func (m *CollectedStatementStatistics) MarshalTo(dAtA []byte) (int, error) {
 	dAtA[i] = 0xa
 	i++
 	i = encodeVarintAppStats(dAtA, i, uint64(m.Key.Size()))
-	n7, err := m.Key.MarshalTo(dAtA[i:])
+	n20, err := m.Key.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n7
+	i += n20
 	dAtA[i] = 0x12
 	i++
 	i = encodeVarintAppStats(dAtA, i, uint64(m.Stats.Size()))
-	n8, err := m.Stats.MarshalTo(dAtA[i:])
+	n21, err := m.Stats.MarshalTo(dAtA[i:])
 	if err != nil {
 		return 0, err
 	}
-	i += n8
+	i += n21
+	dAtA[i] = 0x18
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(m.ID))
+	return i, nil
+}
+
+func (m *CollectedTransactionStatistics) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *CollectedTransactionStatistics) MarshalTo(dAtA []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	if len(m.StatementIDs) > 0 {
+		for _, num := range m.StatementIDs {
+			dAtA[i] = 0x8
+			i++
+			i = encodeVarintAppStats(dAtA, i, uint64(num))
+		}
+	}
+	dAtA[i] = 0x12
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(len(m.App)))
+	i += copy(dAtA[i:], m.App)
+	dAtA[i] = 0x1a
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(m.Stats.Size()))
+	n22, err := m.Stats.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n22
+	return i, nil
+}
+
+func (m *ExplainTreePlanNode) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *ExplainTreePlanNode) MarshalTo(dAtA []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	dAtA[i] = 0xa
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(len(m.Name)))
+	i += copy(dAtA[i:], m.Name)
+	if len(m.Attrs) > 0 {
+		for _, msg := range m.Attrs {
+			dAtA[i] = 0x12
+			i++
+			i = encodeVarintAppStats(dAtA, i, uint64(msg.Size()))
+			n, err := msg.MarshalTo(dAtA[i:])
+			if err != nil {
+				return 0, err
+			}
+			i += n
+		}
+	}
+	if len(m.Children) > 0 {
+		for _, msg := range m.Children {
+			dAtA[i] = 0x1a
+			i++
+			i = encodeVarintAppStats(dAtA, i, uint64(msg.Size()))
+			n, err := msg.MarshalTo(dAtA[i:])
+			if err != nil {
+				return 0, err
+			}
+			i += n
+		}
+	}
+	return i, nil
+}
+
+func (m *ExplainTreePlanNode_Attr) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *ExplainTreePlanNode_Attr) MarshalTo(dAtA []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	dAtA[i] = 0xa
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(len(m.Key)))
+	i += copy(dAtA[i:], m.Key)
+	dAtA[i] = 0x12
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(len(m.Value)))
+	i += copy(dAtA[i:], m.Value)
+	return i, nil
+}
+
+func (m *TxnStats) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *TxnStats) MarshalTo(dAtA []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	dAtA[i] = 0x8
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(m.TxnCount))
+	dAtA[i] = 0x12
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(m.TxnTimeSec.Size()))
+	n23, err := m.TxnTimeSec.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n23
+	dAtA[i] = 0x18
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(m.CommittedCount))
+	dAtA[i] = 0x20
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(m.ImplicitCount))
+	return i, nil
+}
+
+func (m *ExecStats) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalTo(dAtA)
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *ExecStats) MarshalTo(dAtA []byte) (int, error) {
+	var i int
+	_ = i
+	var l int
+	_ = l
+	dAtA[i] = 0x8
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(m.Count))
+	dAtA[i] = 0x12
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(m.NetworkBytes.Size()))
+	n24, err := m.NetworkBytes.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n24
+	dAtA[i] = 0x1a
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(m.MaxMemUsage.Size()))
+	n25, err := m.MaxMemUsage.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n25
+	dAtA[i] = 0x22
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(m.ContentionTime.Size()))
+	n26, err := m.ContentionTime.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n26
+	dAtA[i] = 0x2a
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(m.NetworkMessages.Size()))
+	n27, err := m.NetworkMessages.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n27
+	dAtA[i] = 0x32
+	i++
+	i = encodeVarintAppStats(dAtA, i, uint64(m.MaxDiskUsage.Size()))
+	n28, err := m.MaxDiskUsage.MarshalTo(dAtA[i:])
+	if err != nil {
+		return 0, err
+	}
+	i += n28
 	return i, nil
 }
 
@@ -316,12 +1239,15 @@ func encodeVarintAppStats(dAtA []byte, offset int, v uint64) int {
 	return offset + 1
 }
 func (m *StatementStatistics) Size() (n int) {
+	if m == nil {
+		return 0
+	}
 	var l int
 	_ = l
 	n += 1 + sovAppStats(uint64(m.Count))
 	n += 1 + sovAppStats(uint64(m.FirstAttemptCount))
 	n += 1 + sovAppStats(uint64(m.MaxRetries))
-	l = len(m.LastErr)
+	l = len(m.LegacyLastErr)
 	n += 1 + l + sovAppStats(uint64(l))
 	l = m.NumRows.Size()
 	n += 1 + l + sovAppStats(uint64(l))
@@ -335,12 +1261,63 @@ func (m *StatementStatistics) Size() (n int) {
 	n += 1 + l + sovAppStats(uint64(l))
 	l = m.OverheadLat.Size()
 	n += 1 + l + sovAppStats(uint64(l))
-	l = len(m.LastErrRedacted)
+	l = len(m.LegacyLastErrRedacted)
+	n += 1 + l + sovAppStats(uint64(l))
+	l = m.SensitiveInfo.Size()
+	n += 1 + l + sovAppStats(uint64(l))
+	l = m.BytesRead.Size()
+	n += 1 + l + sovAppStats(uint64(l))
+	l = m.RowsRead.Size()
+	n += 2 + l + sovAppStats(uint64(l))
+	l = m.ExecStats.Size()
+	n += 2 + l + sovAppStats(uint64(l))
+	return n
+}
+
+func (m *TransactionStatistics) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	n += 1 + sovAppStats(uint64(m.Count))
+	n += 1 + sovAppStats(uint64(m.MaxRetries))
+	l = m.NumRows.Size()
+	n += 1 + l + sovAppStats(uint64(l))
+	l = m.ServiceLat.Size()
+	n += 1 + l + sovAppStats(uint64(l))
+	l = m.RetryLat.Size()
+	n += 1 + l + sovAppStats(uint64(l))
+	l = m.CommitLat.Size()
+	n += 1 + l + sovAppStats(uint64(l))
+	l = m.BytesRead.Size()
+	n += 1 + l + sovAppStats(uint64(l))
+	l = m.RowsRead.Size()
+	n += 1 + l + sovAppStats(uint64(l))
+	l = m.ExecStats.Size()
+	n += 1 + l + sovAppStats(uint64(l))
+	return n
+}
+
+func (m *SensitiveInfo) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	l = len(m.LastErr)
+	n += 1 + l + sovAppStats(uint64(l))
+	l = m.MostRecentPlanDescription.Size()
+	n += 1 + l + sovAppStats(uint64(l))
+	l = github_com_gogo_protobuf_types.SizeOfStdTime(m.MostRecentPlanTimestamp)
 	n += 1 + l + sovAppStats(uint64(l))
 	return n
 }
 
 func (m *NumericStat) Size() (n int) {
+	if m == nil {
+		return 0
+	}
 	var l int
 	_ = l
 	n += 9
@@ -349,6 +1326,9 @@ func (m *NumericStat) Size() (n int) {
 }
 
 func (m *StatementStatisticsKey) Size() (n int) {
+	if m == nil {
+		return 0
+	}
 	var l int
 	_ = l
 	l = len(m.Query)
@@ -358,15 +1338,110 @@ func (m *StatementStatisticsKey) Size() (n int) {
 	n += 2
 	n += 2
 	n += 2
+	n += 2
+	n += 2
+	n += 2
 	return n
 }
 
 func (m *CollectedStatementStatistics) Size() (n int) {
+	if m == nil {
+		return 0
+	}
 	var l int
 	_ = l
 	l = m.Key.Size()
 	n += 1 + l + sovAppStats(uint64(l))
 	l = m.Stats.Size()
+	n += 1 + l + sovAppStats(uint64(l))
+	n += 1 + sovAppStats(uint64(m.ID))
+	return n
+}
+
+func (m *CollectedTransactionStatistics) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	if len(m.StatementIDs) > 0 {
+		for _, e := range m.StatementIDs {
+			n += 1 + sovAppStats(uint64(e))
+		}
+	}
+	l = len(m.App)
+	n += 1 + l + sovAppStats(uint64(l))
+	l = m.Stats.Size()
+	n += 1 + l + sovAppStats(uint64(l))
+	return n
+}
+
+func (m *ExplainTreePlanNode) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	l = len(m.Name)
+	n += 1 + l + sovAppStats(uint64(l))
+	if len(m.Attrs) > 0 {
+		for _, e := range m.Attrs {
+			l = e.Size()
+			n += 1 + l + sovAppStats(uint64(l))
+		}
+	}
+	if len(m.Children) > 0 {
+		for _, e := range m.Children {
+			l = e.Size()
+			n += 1 + l + sovAppStats(uint64(l))
+		}
+	}
+	return n
+}
+
+func (m *ExplainTreePlanNode_Attr) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	l = len(m.Key)
+	n += 1 + l + sovAppStats(uint64(l))
+	l = len(m.Value)
+	n += 1 + l + sovAppStats(uint64(l))
+	return n
+}
+
+func (m *TxnStats) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	n += 1 + sovAppStats(uint64(m.TxnCount))
+	l = m.TxnTimeSec.Size()
+	n += 1 + l + sovAppStats(uint64(l))
+	n += 1 + sovAppStats(uint64(m.CommittedCount))
+	n += 1 + sovAppStats(uint64(m.ImplicitCount))
+	return n
+}
+
+func (m *ExecStats) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	n += 1 + sovAppStats(uint64(m.Count))
+	l = m.NetworkBytes.Size()
+	n += 1 + l + sovAppStats(uint64(l))
+	l = m.MaxMemUsage.Size()
+	n += 1 + l + sovAppStats(uint64(l))
+	l = m.ContentionTime.Size()
+	n += 1 + l + sovAppStats(uint64(l))
+	l = m.NetworkMessages.Size()
+	n += 1 + l + sovAppStats(uint64(l))
+	l = m.MaxDiskUsage.Size()
 	n += 1 + l + sovAppStats(uint64(l))
 	return n
 }
@@ -472,7 +1547,7 @@ func (m *StatementStatistics) Unmarshal(dAtA []byte) error {
 			}
 		case 4:
 			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field LastErr", wireType)
+				return fmt.Errorf("proto: wrong wireType = %d for field LegacyLastErr", wireType)
 			}
 			var stringLen uint64
 			for shift := uint(0); ; shift += 7 {
@@ -497,7 +1572,7 @@ func (m *StatementStatistics) Unmarshal(dAtA []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.LastErr = string(dAtA[iNdEx:postIndex])
+			m.LegacyLastErr = string(dAtA[iNdEx:postIndex])
 			iNdEx = postIndex
 		case 5:
 			if wireType != 2 {
@@ -681,7 +1756,7 @@ func (m *StatementStatistics) Unmarshal(dAtA []byte) error {
 			iNdEx = postIndex
 		case 11:
 			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field LastErrRedacted", wireType)
+				return fmt.Errorf("proto: wrong wireType = %d for field LegacyLastErrRedacted", wireType)
 			}
 			var stringLen uint64
 			for shift := uint(0); ; shift += 7 {
@@ -706,7 +1781,127 @@ func (m *StatementStatistics) Unmarshal(dAtA []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.LastErrRedacted = string(dAtA[iNdEx:postIndex])
+			m.LegacyLastErrRedacted = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 12:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field SensitiveInfo", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.SensitiveInfo.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 15:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field BytesRead", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.BytesRead.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 16:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field RowsRead", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.RowsRead.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 21:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ExecStats", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.ExecStats.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
@@ -714,7 +1909,444 @@ func (m *StatementStatistics) Unmarshal(dAtA []byte) error {
 			if err != nil {
 				return err
 			}
-			if skippy < 0 {
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *TransactionStatistics) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowAppStats
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: TransactionStatistics: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: TransactionStatistics: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Count", wireType)
+			}
+			m.Count = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.Count |= (int64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 2:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field MaxRetries", wireType)
+			}
+			m.MaxRetries = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.MaxRetries |= (int64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field NumRows", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.NumRows.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 4:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ServiceLat", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.ServiceLat.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 5:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field RetryLat", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.RetryLat.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 6:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field CommitLat", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.CommitLat.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 7:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field BytesRead", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.BytesRead.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 8:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field RowsRead", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.RowsRead.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 9:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ExecStats", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.ExecStats.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipAppStats(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *SensitiveInfo) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowAppStats
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: SensitiveInfo: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: SensitiveInfo: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field LastErr", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.LastErr = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field MostRecentPlanDescription", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.MostRecentPlanDescription.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field MostRecentPlanTimestamp", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := github_com_gogo_protobuf_types.StdTimeUnmarshal(&m.MostRecentPlanTimestamp, dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipAppStats(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
 				return ErrInvalidLengthAppStats
 			}
 			if (iNdEx + skippy) > l {
@@ -766,7 +2398,7 @@ func (m *NumericStat) Unmarshal(dAtA []byte) error {
 			if (iNdEx + 8) > l {
 				return io.ErrUnexpectedEOF
 			}
-			v = uint64(binary.LittleEndian.Uint64(dAtA[iNdEx:]))
+			v = uint64(encoding_binary.LittleEndian.Uint64(dAtA[iNdEx:]))
 			iNdEx += 8
 			m.Mean = float64(math.Float64frombits(v))
 		case 2:
@@ -777,7 +2409,7 @@ func (m *NumericStat) Unmarshal(dAtA []byte) error {
 			if (iNdEx + 8) > l {
 				return io.ErrUnexpectedEOF
 			}
-			v = uint64(binary.LittleEndian.Uint64(dAtA[iNdEx:]))
+			v = uint64(encoding_binary.LittleEndian.Uint64(dAtA[iNdEx:]))
 			iNdEx += 8
 			m.SquaredDiffs = float64(math.Float64frombits(v))
 		default:
@@ -786,7 +2418,7 @@ func (m *NumericStat) Unmarshal(dAtA []byte) error {
 			if err != nil {
 				return err
 			}
-			if skippy < 0 {
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
 				return ErrInvalidLengthAppStats
 			}
 			if (iNdEx + skippy) > l {
@@ -948,13 +2580,73 @@ func (m *StatementStatisticsKey) Unmarshal(dAtA []byte) error {
 				}
 			}
 			m.Opt = bool(v != 0)
+		case 6:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ImplicitTxn", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.ImplicitTxn = bool(v != 0)
+		case 7:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Vec", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.Vec = bool(v != 0)
+		case 8:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field FullScan", wireType)
+			}
+			var v int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.FullScan = bool(v != 0)
 		default:
 			iNdEx = preIndex
 			skippy, err := skipAppStats(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
-			if skippy < 0 {
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
 				return ErrInvalidLengthAppStats
 			}
 			if (iNdEx + skippy) > l {
@@ -1058,13 +2750,819 @@ func (m *CollectedStatementStatistics) Unmarshal(dAtA []byte) error {
 				return err
 			}
 			iNdEx = postIndex
+		case 3:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ID", wireType)
+			}
+			m.ID = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.ID |= (StmtID(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
 		default:
 			iNdEx = preIndex
 			skippy, err := skipAppStats(dAtA[iNdEx:])
 			if err != nil {
 				return err
 			}
-			if skippy < 0 {
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *CollectedTransactionStatistics) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowAppStats
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: CollectedTransactionStatistics: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: CollectedTransactionStatistics: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType == 0 {
+				var v StmtID
+				for shift := uint(0); ; shift += 7 {
+					if shift >= 64 {
+						return ErrIntOverflowAppStats
+					}
+					if iNdEx >= l {
+						return io.ErrUnexpectedEOF
+					}
+					b := dAtA[iNdEx]
+					iNdEx++
+					v |= (StmtID(b) & 0x7F) << shift
+					if b < 0x80 {
+						break
+					}
+				}
+				m.StatementIDs = append(m.StatementIDs, v)
+			} else if wireType == 2 {
+				var packedLen int
+				for shift := uint(0); ; shift += 7 {
+					if shift >= 64 {
+						return ErrIntOverflowAppStats
+					}
+					if iNdEx >= l {
+						return io.ErrUnexpectedEOF
+					}
+					b := dAtA[iNdEx]
+					iNdEx++
+					packedLen |= (int(b) & 0x7F) << shift
+					if b < 0x80 {
+						break
+					}
+				}
+				if packedLen < 0 {
+					return ErrInvalidLengthAppStats
+				}
+				postIndex := iNdEx + packedLen
+				if postIndex > l {
+					return io.ErrUnexpectedEOF
+				}
+				var elementCount int
+				var count int
+				for _, integer := range dAtA {
+					if integer < 128 {
+						count++
+					}
+				}
+				elementCount = count
+				if elementCount != 0 && len(m.StatementIDs) == 0 {
+					m.StatementIDs = make([]StmtID, 0, elementCount)
+				}
+				for iNdEx < postIndex {
+					var v StmtID
+					for shift := uint(0); ; shift += 7 {
+						if shift >= 64 {
+							return ErrIntOverflowAppStats
+						}
+						if iNdEx >= l {
+							return io.ErrUnexpectedEOF
+						}
+						b := dAtA[iNdEx]
+						iNdEx++
+						v |= (StmtID(b) & 0x7F) << shift
+						if b < 0x80 {
+							break
+						}
+					}
+					m.StatementIDs = append(m.StatementIDs, v)
+				}
+			} else {
+				return fmt.Errorf("proto: wrong wireType = %d for field StatementIDs", wireType)
+			}
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field App", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.App = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Stats", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.Stats.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipAppStats(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *ExplainTreePlanNode) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowAppStats
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: ExplainTreePlanNode: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: ExplainTreePlanNode: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Name", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Name = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Attrs", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Attrs = append(m.Attrs, &ExplainTreePlanNode_Attr{})
+			if err := m.Attrs[len(m.Attrs)-1].Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Children", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Children = append(m.Children, &ExplainTreePlanNode{})
+			if err := m.Children[len(m.Children)-1].Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipAppStats(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *ExplainTreePlanNode_Attr) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowAppStats
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: Attr: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: Attr: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Key", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Key = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Value", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= (uint64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Value = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipAppStats(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *TxnStats) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowAppStats
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: TxnStats: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: TxnStats: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field TxnCount", wireType)
+			}
+			m.TxnCount = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.TxnCount |= (int64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field TxnTimeSec", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.TxnTimeSec.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 3:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field CommittedCount", wireType)
+			}
+			m.CommittedCount = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.CommittedCount |= (int64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 4:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ImplicitCount", wireType)
+			}
+			m.ImplicitCount = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.ImplicitCount |= (int64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		default:
+			iNdEx = preIndex
+			skippy, err := skipAppStats(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *ExecStats) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowAppStats
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= (uint64(b) & 0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: ExecStats: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: ExecStats: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Count", wireType)
+			}
+			m.Count = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.Count |= (int64(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field NetworkBytes", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.NetworkBytes.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field MaxMemUsage", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.MaxMemUsage.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 4:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ContentionTime", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.ContentionTime.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 5:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field NetworkMessages", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.NetworkMessages.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 6:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field MaxDiskUsage", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowAppStats
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= (int(b) & 0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthAppStats
+			}
+			postIndex := iNdEx + msglen
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if err := m.MaxDiskUsage.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipAppStats(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
 				return ErrInvalidLengthAppStats
 			}
 			if (iNdEx + skippy) > l {
@@ -1184,42 +3682,90 @@ var (
 	ErrIntOverflowAppStats   = fmt.Errorf("proto: integer overflow")
 )
 
-func init() { proto.RegisterFile("roachpb/app_stats.proto", fileDescriptorAppStats) }
+func init() { proto.RegisterFile("roachpb/app_stats.proto", fileDescriptor_app_stats_34443f9da23633b4) }
 
-var fileDescriptorAppStats = []byte{
-	// 538 bytes of a gzipped FileDescriptorProto
-	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x8c, 0x94, 0xcf, 0x6e, 0xd3, 0x40,
-	0x10, 0xc6, 0xbb, 0xe4, 0xff, 0xb8, 0x15, 0xea, 0x16, 0x15, 0x2b, 0xaa, 0xdc, 0x10, 0xa9, 0x52,
-	0xb8, 0xa4, 0x28, 0xe2, 0x82, 0x50, 0x91, 0xda, 0xc0, 0x89, 0x0a, 0x89, 0xf4, 0xc6, 0xc5, 0x5a,
-	0xec, 0x49, 0x6b, 0xc5, 0xf6, 0x6e, 0x76, 0xd7, 0x6d, 0xf3, 0x16, 0xbc, 0x00, 0x17, 0x9e, 0x26,
-	0x47, 0x8e, 0x5c, 0x40, 0x10, 0x5e, 0x04, 0xed, 0xda, 0x2b, 0x05, 0x14, 0x89, 0xdc, 0xac, 0xef,
-	0x9b, 0xdf, 0xb7, 0x3b, 0x9e, 0xb1, 0xe1, 0xb1, 0xe4, 0x2c, 0xba, 0x11, 0x1f, 0x4f, 0x99, 0x10,
-	0xa1, 0xd2, 0x4c, 0xab, 0xa1, 0x90, 0x5c, 0x73, 0xba, 0x17, 0xf1, 0x68, 0x66, 0xcd, 0xa1, 0x9a,
-	0xa7, 0xdd, 0x47, 0xd7, 0xfc, 0x9a, 0x5b, 0xe7, 0xd4, 0x3c, 0x95, 0x45, 0xfd, 0xef, 0x75, 0x38,
-	0xb8, 0xd2, 0x4c, 0x63, 0x86, 0xb9, 0x36, 0x0f, 0x89, 0xd2, 0x49, 0xa4, 0x68, 0x17, 0x1a, 0x11,
-	0x2f, 0x72, 0xed, 0x93, 0x1e, 0x19, 0xd4, 0x2e, 0xea, 0xcb, 0x1f, 0xc7, 0x3b, 0x93, 0x52, 0xa2,
-	0xcf, 0xe1, 0x60, 0x9a, 0x48, 0xa5, 0x43, 0xa6, 0x35, 0x66, 0x42, 0x87, 0x65, 0xe5, 0x83, 0xb5,
-	0xca, 0x7d, 0x5b, 0x70, 0x5e, 0xfa, 0x63, 0x4b, 0x9d, 0x80, 0x97, 0xb1, 0xfb, 0x50, 0xa2, 0x96,
-	0x09, 0x2a, 0xbf, 0xb6, 0x56, 0x0d, 0x19, 0xbb, 0x9f, 0x94, 0x3a, 0x3d, 0x86, 0x76, 0xca, 0x94,
-	0x0e, 0x51, 0x4a, 0xbf, 0xde, 0x23, 0x83, 0x4e, 0x55, 0xd3, 0x32, 0xea, 0x1b, 0x29, 0xe9, 0x4b,
-	0x68, 0xe7, 0x45, 0x16, 0x4a, 0x7e, 0xa7, 0xfc, 0x46, 0x8f, 0x0c, 0xbc, 0x51, 0x77, 0xf8, 0x57,
-	0xa7, 0xc3, 0x77, 0x45, 0x86, 0x32, 0x89, 0x4c, 0x37, 0x0e, 0xce, 0x8b, 0x6c, 0xc2, 0xef, 0x14,
-	0x3d, 0x83, 0x8e, 0x60, 0x52, 0x61, 0x98, 0x32, 0xed, 0x37, 0xb7, 0xa4, 0xdb, 0x16, 0xb9, 0x64,
-	0xda, 0x9c, 0x2d, 0x52, 0x96, 0x5b, 0xba, 0xb5, 0xed, 0xd9, 0x86, 0x30, 0xf0, 0x0b, 0x68, 0xc9,
-	0xa2, 0x64, 0xdb, 0x5b, 0xb2, 0x4d, 0x59, 0x58, 0xf4, 0x1c, 0x3c, 0x85, 0xf2, 0x36, 0x89, 0xca,
-	0x8b, 0x77, 0xb6, 0xc4, 0xa1, 0x82, 0x4c, 0xc4, 0x18, 0x76, 0xf9, 0x2d, 0xca, 0x1b, 0x64, 0xb1,
-	0xcd, 0x80, 0x2d, 0x33, 0x3c, 0x47, 0x99, 0x90, 0x67, 0xb0, 0xef, 0x86, 0x13, 0x4a, 0x8c, 0x59,
-	0xa4, 0x31, 0xf6, 0xbd, 0xb5, 0x29, 0x3d, 0xac, 0xa6, 0x34, 0xa9, 0xcc, 0xfe, 0x04, 0xbc, 0xb5,
-	0x4c, 0xea, 0x43, 0x3d, 0x43, 0x96, 0xdb, 0xad, 0x22, 0x15, 0x63, 0x15, 0xfa, 0x14, 0xf6, 0xd4,
-	0xbc, 0x60, 0x12, 0xe3, 0x30, 0x4e, 0xa6, 0x53, 0x65, 0xd7, 0xc9, 0x95, 0xec, 0x56, 0xd6, 0x6b,
-	0xe3, 0xf4, 0xbf, 0x10, 0x38, 0xdc, 0xb0, 0xb3, 0x6f, 0x71, 0x61, 0xd6, 0x76, 0x5e, 0xa0, 0x5c,
-	0xd8, 0x03, 0xdc, 0xa5, 0x4a, 0x89, 0x1e, 0x42, 0x8d, 0x09, 0x61, 0x73, 0x9d, 0x63, 0x04, 0x1a,
-	0x40, 0x2b, 0x4e, 0x94, 0xbe, 0x7a, 0x7f, 0x69, 0x97, 0xb2, 0xed, 0xe6, 0x56, 0x89, 0xf4, 0x08,
-	0x9a, 0x53, 0x96, 0xa4, 0x18, 0xdb, 0x7d, 0x74, 0x76, 0xa5, 0x99, 0x54, 0x2e, 0xb4, 0xdd, 0x44,
-	0x67, 0x19, 0xa1, 0xff, 0x99, 0xc0, 0xd1, 0x98, 0xa7, 0x29, 0x9a, 0xd7, 0xb0, 0xe9, 0x0b, 0x3b,
-	0x83, 0xda, 0x0c, 0xcb, 0x8b, 0x7a, 0xa3, 0x93, 0x7f, 0xe6, 0xb0, 0xb9, 0x3d, 0x97, 0x3f, 0xc3,
-	0x05, 0x7d, 0x05, 0x0d, 0xfb, 0xb1, 0xdb, 0x7e, 0xbc, 0x51, 0xff, 0xff, 0x01, 0xee, 0x6d, 0x58,
-	0xec, 0xe2, 0xc9, 0xf2, 0x57, 0xb0, 0xb3, 0x5c, 0x05, 0xe4, 0xeb, 0x2a, 0x20, 0xdf, 0x56, 0x01,
-	0xf9, 0xb9, 0x0a, 0xc8, 0xa7, 0xdf, 0xc1, 0xce, 0x87, 0x56, 0xf5, 0x43, 0xf9, 0x13, 0x00, 0x00,
-	0xff, 0xff, 0x4d, 0xe7, 0x67, 0x54, 0x5a, 0x04, 0x00, 0x00,
+var fileDescriptor_app_stats_34443f9da23633b4 = []byte{
+	// 1301 bytes of a gzipped FileDescriptorProto
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xa4, 0x57, 0xbd, 0x6f, 0x1b, 0xc7,
+	0x12, 0xd7, 0x89, 0x27, 0xf1, 0x38, 0xfc, 0x10, 0xbd, 0x92, 0xec, 0x7b, 0x84, 0x40, 0xea, 0x11,
+	0x36, 0x2c, 0xe3, 0xbd, 0x47, 0x01, 0xc2, 0x6b, 0x92, 0x40, 0xfe, 0xa0, 0xe9, 0x00, 0x94, 0x3f,
+	0x90, 0x50, 0x4a, 0x93, 0xe6, 0xb0, 0xbe, 0x1b, 0xca, 0x0b, 0xdd, 0x97, 0x77, 0x97, 0x32, 0xd5,
+	0x07, 0xa9, 0x5d, 0xa4, 0x49, 0x97, 0x26, 0x7f, 0x45, 0xca, 0x34, 0x6e, 0x02, 0xb8, 0x74, 0xa5,
+	0x24, 0x72, 0x93, 0xbf, 0x20, 0x45, 0xaa, 0x60, 0xf7, 0xee, 0x68, 0x92, 0xa6, 0x93, 0x73, 0xdc,
+	0x51, 0x33, 0xf3, 0xfb, 0xed, 0xce, 0xdc, 0x6f, 0x66, 0x56, 0x70, 0x85, 0x47, 0xd4, 0x7d, 0x12,
+	0x3f, 0xde, 0xa5, 0x71, 0xec, 0x08, 0x49, 0xa5, 0xe8, 0xc4, 0x3c, 0x92, 0x11, 0xa9, 0xba, 0x91,
+	0x7b, 0xa2, 0x9d, 0x1d, 0xf1, 0xd4, 0x6f, 0x6c, 0x1c, 0x47, 0xc7, 0x91, 0xf6, 0xec, 0xaa, 0x5f,
+	0x49, 0x50, 0xa3, 0x75, 0x1c, 0x45, 0xc7, 0x3e, 0xee, 0xea, 0xbf, 0x1e, 0x8f, 0x86, 0xbb, 0x92,
+	0x05, 0x28, 0x24, 0x0d, 0xe2, 0x24, 0xa0, 0xfd, 0x7d, 0x11, 0xd6, 0x0f, 0x25, 0x95, 0x18, 0x60,
+	0x28, 0xd5, 0x0f, 0x26, 0x24, 0x73, 0x05, 0x69, 0xc0, 0x8a, 0x1b, 0x8d, 0x42, 0x69, 0x1b, 0xdb,
+	0xc6, 0x4e, 0xa1, 0x6b, 0xbe, 0x38, 0x6f, 0x2d, 0x0d, 0x12, 0x13, 0xf9, 0x3f, 0xac, 0x0f, 0x19,
+	0x17, 0xd2, 0xa1, 0x52, 0x62, 0x10, 0x4b, 0x27, 0x89, 0x5c, 0x9e, 0x8a, 0xbc, 0xa4, 0x03, 0xee,
+	0x24, 0xfe, 0xbb, 0x1a, 0x75, 0x0d, 0xca, 0x01, 0x1d, 0x3b, 0x1c, 0x25, 0x67, 0x28, 0xec, 0xc2,
+	0x54, 0x34, 0x04, 0x74, 0x3c, 0x48, 0xec, 0xe4, 0xbf, 0xb0, 0xe6, 0xe3, 0x31, 0x75, 0xcf, 0x1c,
+	0x9f, 0x0a, 0xe9, 0x20, 0xe7, 0xb6, 0xb9, 0x6d, 0xec, 0x94, 0xd2, 0xd0, 0x6a, 0xe2, 0x7c, 0x40,
+	0x85, 0xbc, 0xc7, 0x39, 0xf9, 0x04, 0xac, 0x70, 0x14, 0x38, 0x3c, 0x7a, 0x26, 0xec, 0x95, 0x6d,
+	0x63, 0xa7, 0xbc, 0xd7, 0xe8, 0xcc, 0xd4, 0xa5, 0xf3, 0x68, 0x14, 0x20, 0x67, 0xae, 0x4a, 0x2d,
+	0xa5, 0x28, 0x86, 0xa3, 0x60, 0x10, 0x3d, 0x13, 0x64, 0x1f, 0x4a, 0x31, 0xe5, 0x02, 0x1d, 0x9f,
+	0x4a, 0x7b, 0x35, 0x27, 0xda, 0xd2, 0x90, 0x07, 0x54, 0xaa, 0xb3, 0x63, 0x9f, 0x86, 0x1a, 0x5d,
+	0xcc, 0x7b, 0xb6, 0x42, 0x28, 0xf0, 0x47, 0x50, 0xe4, 0xa3, 0x04, 0x6b, 0xe5, 0xc4, 0xae, 0xf2,
+	0x91, 0x86, 0xde, 0x81, 0xb2, 0x40, 0x7e, 0xca, 0xdc, 0xe4, 0xe2, 0xa5, 0x9c, 0x70, 0x48, 0x41,
+	0x8a, 0xe2, 0x2e, 0x54, 0xa2, 0x53, 0xe4, 0x4f, 0x90, 0x7a, 0x9a, 0x03, 0x72, 0x72, 0x94, 0x33,
+	0x94, 0x22, 0xd9, 0x07, 0x7b, 0xee, 0x4b, 0x39, 0x1c, 0x3d, 0xea, 0x4a, 0xf4, 0xec, 0xf2, 0xd4,
+	0x27, 0xdb, 0x9c, 0xf9, 0x64, 0x83, 0x34, 0x84, 0xf4, 0xa1, 0x26, 0x30, 0x14, 0x4c, 0xb2, 0x53,
+	0x74, 0x58, 0x38, 0x8c, 0xec, 0x8a, 0xbe, 0xc5, 0xd6, 0xdc, 0x2d, 0x0e, 0xb3, 0xa0, 0x7e, 0x38,
+	0x8c, 0x32, 0x15, 0x88, 0x69, 0x23, 0xb9, 0x05, 0xf0, 0xf8, 0x4c, 0xa2, 0x70, 0x38, 0x52, 0xcf,
+	0x5e, 0xcb, 0x99, 0x4c, 0x49, 0x63, 0x06, 0x48, 0x3d, 0xa5, 0x04, 0x25, 0xa1, 0x04, 0x5f, 0xcf,
+	0xab, 0x04, 0x05, 0x49, 0xe1, 0x80, 0x63, 0x74, 0x93, 0xf6, 0xb4, 0x37, 0x35, 0xde, 0x9e, 0xc3,
+	0xdf, 0x1b, 0xa3, 0x06, 0x8b, 0xec, 0x74, 0xcc, 0x0c, 0x07, 0xa6, 0x55, 0xad, 0xd7, 0x0e, 0x4c,
+	0xab, 0x56, 0x5f, 0x3b, 0x30, 0xad, 0x4b, 0x75, 0x72, 0x60, 0x5a, 0xa4, 0xbe, 0x7e, 0x60, 0x5a,
+	0xeb, 0xf5, 0x8d, 0x03, 0xd3, 0xda, 0xa8, 0x6f, 0xb6, 0xbf, 0x35, 0x61, 0xf3, 0x88, 0xd3, 0x50,
+	0x50, 0x57, 0xb2, 0x28, 0xcc, 0xd9, 0xa9, 0x73, 0x3d, 0xb7, 0xfc, 0x8e, 0x9e, 0x9b, 0xee, 0xa2,
+	0xc2, 0xfb, 0x76, 0xd1, 0x9c, 0x1c, 0xcd, 0x7f, 0x20, 0x47, 0x55, 0x7e, 0x94, 0xfc, 0x4c, 0x13,
+	0xac, 0xe4, 0x2e, 0xbf, 0x82, 0x28, 0xf8, 0x2d, 0x00, 0x37, 0x0a, 0x02, 0x26, 0xdf, 0xab, 0x91,
+	0x4b, 0x09, 0x26, 0x25, 0x98, 0xd2, 0x4f, 0xf1, 0x03, 0xf5, 0x63, 0x7d, 0xa0, 0x7e, 0x4a, 0xef,
+	0xa9, 0x9f, 0xf6, 0x57, 0xcb, 0x50, 0x9d, 0xe9, 0x12, 0xd2, 0x02, 0x6b, 0x32, 0x3d, 0x8d, 0xa9,
+	0x56, 0x2c, 0xfa, 0xe9, 0xdc, 0x64, 0xb0, 0x15, 0x44, 0x42, 0x3a, 0x1c, 0x5d, 0x0c, 0xa5, 0xa3,
+	0xe7, 0x98, 0x87, 0xc2, 0xe5, 0x2c, 0x56, 0xf2, 0xd2, 0x4a, 0x29, 0xef, 0xb5, 0xdf, 0xba, 0x43,
+	0xec, 0x53, 0x16, 0x1e, 0x71, 0xc4, 0xcf, 0x7c, 0x1a, 0x3e, 0x8a, 0x3c, 0x4c, 0x89, 0xff, 0xa5,
+	0xd8, 0x06, 0x9a, 0x4c, 0x79, 0x7a, 0x6f, 0xa8, 0x08, 0x85, 0xc6, 0x5b, 0x47, 0x4d, 0xb6, 0xd0,
+	0x44, 0x6e, 0xc9, 0x9e, 0xea, 0x64, 0x7b, 0xaa, 0x73, 0x94, 0x45, 0x74, 0x2d, 0x75, 0xc0, 0xf3,
+	0x9f, 0x5b, 0xc6, 0xe0, 0xca, 0xec, 0x21, 0x93, 0x90, 0x8f, 0xcd, 0xdf, 0xbe, 0x6b, 0x19, 0xed,
+	0x01, 0x94, 0xa7, 0x8a, 0x4c, 0x6c, 0x30, 0x03, 0xa4, 0xa1, 0xce, 0xdf, 0x48, 0xaf, 0xa9, 0x2d,
+	0xe4, 0x06, 0x54, 0xc5, 0xd3, 0x11, 0xe5, 0xe8, 0x39, 0x1e, 0x1b, 0x0e, 0x93, 0xbe, 0xc8, 0x42,
+	0x2a, 0xa9, 0xab, 0xa7, 0x3c, 0xed, 0xaf, 0x97, 0xe1, 0xf2, 0x82, 0xf5, 0x78, 0x1f, 0xcf, 0x54,
+	0xdf, 0x3d, 0x1d, 0x21, 0x3f, 0x9b, 0x29, 0x70, 0x62, 0x22, 0x97, 0xa1, 0x40, 0xe3, 0x58, 0xf3,
+	0x66, 0x1e, 0x65, 0x20, 0x4d, 0x28, 0x7a, 0x4c, 0xc8, 0xc3, 0xcf, 0x1f, 0xe8, 0xc4, 0xad, 0xec,
+	0xb3, 0xa4, 0x46, 0xb2, 0x05, 0xab, 0x43, 0xca, 0x7c, 0xf4, 0x74, 0x1b, 0x65, 0xee, 0xd4, 0xa6,
+	0x58, 0xa3, 0x38, 0x69, 0x90, 0xcc, 0xa5, 0x0c, 0xe4, 0x3a, 0x54, 0x58, 0x10, 0xfb, 0xcc, 0x65,
+	0xd2, 0x91, 0xe3, 0x50, 0x77, 0x40, 0x16, 0x50, 0xce, 0x3c, 0x47, 0xe3, 0x50, 0x11, 0x9c, 0xa2,
+	0xab, 0x05, 0x3e, 0x21, 0x38, 0x45, 0x97, 0xfc, 0x1b, 0x4a, 0xc3, 0x91, 0xef, 0x3b, 0xc2, 0xa5,
+	0xa1, 0x96, 0x6f, 0xe6, 0xb5, 0x94, 0xf9, 0xd0, 0xa5, 0x61, 0xfb, 0x47, 0x03, 0xb6, 0xee, 0x46,
+	0xbe, 0x8f, 0x6a, 0x76, 0x2f, 0x7a, 0x30, 0xec, 0x43, 0xe1, 0x04, 0x93, 0x62, 0x94, 0xf7, 0xae,
+	0xcd, 0xcf, 0xf0, 0x85, 0x25, 0xcc, 0xae, 0x70, 0x82, 0x67, 0xe4, 0x26, 0xac, 0x24, 0xea, 0x5f,
+	0xac, 0xbc, 0x05, 0x04, 0x59, 0xc5, 0x35, 0x8c, 0x5c, 0x85, 0x65, 0xe6, 0xe9, 0xa2, 0x9a, 0xdd,
+	0x0d, 0xe5, 0xb8, 0x38, 0x6f, 0x2d, 0xf7, 0x7b, 0x7f, 0x9c, 0xb7, 0x56, 0x0f, 0x65, 0x20, 0xfb,
+	0xbd, 0xc1, 0x32, 0xf3, 0xda, 0x3f, 0x18, 0xd0, 0x9c, 0x64, 0xb1, 0x78, 0x9c, 0xde, 0x82, 0xaa,
+	0xc8, 0x0e, 0x73, 0x98, 0x27, 0x6c, 0x63, 0xbb, 0xb0, 0x63, 0x76, 0x1b, 0x17, 0xe7, 0xad, 0xca,
+	0xe4, 0x16, 0xfd, 0x9e, 0x98, 0x62, 0xae, 0x4c, 0x00, 0x7d, 0x4f, 0xbc, 0xf3, 0xdb, 0xdf, 0xce,
+	0x32, 0x4c, 0x24, 0x7f, 0x75, 0x2e, 0xc3, 0x85, 0xb7, 0x99, 0xc9, 0xb1, 0xfd, 0xbb, 0x01, 0xeb,
+	0x0b, 0x5a, 0x50, 0x29, 0x3d, 0xa4, 0x01, 0xce, 0x08, 0x51, 0x5b, 0xc8, 0x3e, 0xac, 0x50, 0x29,
+	0xb9, 0xaa, 0x6a, 0x61, 0xa7, 0xbc, 0x77, 0xfd, 0xef, 0xfb, 0xb9, 0x73, 0x47, 0x4a, 0x3e, 0x48,
+	0x50, 0xe4, 0x26, 0x58, 0xee, 0x13, 0xe6, 0x7b, 0x1c, 0x43, 0xbb, 0xa0, 0x19, 0x72, 0x4c, 0x84,
+	0xc1, 0x04, 0xd3, 0xb8, 0x0d, 0xa6, 0xa2, 0x53, 0x25, 0xc9, 0xb4, 0x51, 0x9a, 0xfe, 0xe8, 0x0d,
+	0x58, 0x39, 0xa5, 0xfe, 0x08, 0x67, 0x8a, 0x95, 0x98, 0x92, 0x9e, 0x4e, 0x3b, 0xfb, 0x27, 0x03,
+	0xac, 0xa3, 0xb1, 0xae, 0x8b, 0x50, 0x62, 0x95, 0xe3, 0xd0, 0x79, 0x7b, 0xe7, 0x59, 0x72, 0x1c,
+	0x26, 0x4f, 0xcd, 0x2e, 0x54, 0x54, 0x88, 0x9a, 0x32, 0x8e, 0x40, 0x37, 0xd5, 0x54, 0x8e, 0x9d,
+	0x24, 0xc7, 0x7a, 0xaa, 0x1c, 0xa2, 0x4b, 0xfe, 0x07, 0x6b, 0xc9, 0x82, 0x90, 0xe8, 0xa5, 0x87,
+	0x4d, 0x3f, 0x59, 0x6b, 0x13, 0x67, 0x72, 0xe4, 0x7f, 0xa0, 0x36, 0xe9, 0xc1, 0x24, 0xda, 0x9c,
+	0x8a, 0xae, 0x66, 0x3e, 0x1d, 0xdc, 0xfe, 0xa6, 0x00, 0xa5, 0xc9, 0x3c, 0xff, 0xcb, 0x05, 0x7e,
+	0x0f, 0xaa, 0x21, 0xca, 0x67, 0x11, 0x3f, 0x71, 0xf4, 0xb6, 0xc9, 0x9d, 0x4a, 0x25, 0x85, 0x75,
+	0x15, 0x8a, 0xf4, 0xa0, 0xaa, 0xde, 0x01, 0x01, 0x06, 0xce, 0x48, 0xd0, 0x63, 0xcc, 0xbd, 0xe5,
+	0xd5, 0xf3, 0xe1, 0x21, 0x06, 0x5f, 0x28, 0x10, 0xe9, 0xab, 0x92, 0x84, 0x12, 0x43, 0x25, 0x52,
+	0x5d, 0xdd, 0xdc, 0xdb, 0xbe, 0xf6, 0x06, 0xa8, 0x0a, 0x4c, 0xee, 0x43, 0x3d, 0xcb, 0x2b, 0x40,
+	0xa1, 0xd8, 0xf3, 0xbf, 0xdf, 0xd7, 0x52, 0xe4, 0xc3, 0x14, 0x48, 0x3e, 0x85, 0x9a, 0xca, 0xce,
+	0x63, 0xe2, 0x24, 0x4d, 0x2f, 0xef, 0x1b, 0xa0, 0x12, 0xd0, 0x71, 0x8f, 0x89, 0x13, 0x9d, 0x5f,
+	0xf7, 0xc6, 0x8b, 0x5f, 0x9b, 0x4b, 0x2f, 0x2e, 0x9a, 0xc6, 0xcb, 0x8b, 0xa6, 0xf1, 0xea, 0xa2,
+	0x69, 0xfc, 0x72, 0xd1, 0x34, 0x9e, 0xbf, 0x6e, 0x2e, 0xbd, 0x7c, 0xdd, 0x5c, 0x7a, 0xf5, 0xba,
+	0xb9, 0xf4, 0x65, 0x31, 0xfd, 0x67, 0xec, 0xcf, 0x00, 0x00, 0x00, 0xff, 0xff, 0x9f, 0x86, 0x1b,
+	0x9d, 0x96, 0x0d, 0x00, 0x00,
 }

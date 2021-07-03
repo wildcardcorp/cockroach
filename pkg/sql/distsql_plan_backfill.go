@@ -1,16 +1,12 @@
 // Copyright 2016 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package sql
 
@@ -18,83 +14,74 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/distsqlpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/distsqlplan"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
+	"github.com/cockroachdb/cockroach/pkg/sql/physicalplan"
+	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
-	"github.com/pkg/errors"
 )
 
-func initBackfillerSpec(
-	backfillType backfillType,
-	desc sqlbase.TableDescriptor,
-	duration time.Duration,
+func initColumnBackfillerSpec(
+	desc descpb.TableDescriptor, duration time.Duration, chunkSize int64, readAsOf hlc.Timestamp,
+) (execinfrapb.BackfillerSpec, error) {
+	return execinfrapb.BackfillerSpec{
+		Table:     desc,
+		Duration:  duration,
+		ChunkSize: chunkSize,
+		ReadAsOf:  readAsOf,
+		Type:      execinfrapb.BackfillerSpec_Column,
+	}, nil
+}
+
+func initIndexBackfillerSpec(
+	desc descpb.TableDescriptor,
+	writeAsOf, readAsOf hlc.Timestamp,
 	chunkSize int64,
-	otherTables []sqlbase.TableDescriptor,
-	readAsOf hlc.Timestamp,
-) (distsqlpb.BackfillerSpec, error) {
-	ret := distsqlpb.BackfillerSpec{
-		Table:       desc,
-		Duration:    duration,
-		ChunkSize:   chunkSize,
-		OtherTables: otherTables,
-		ReadAsOf:    readAsOf,
-	}
-	switch backfillType {
-	case indexBackfill:
-		ret.Type = distsqlpb.BackfillerSpec_Index
-	case columnBackfill:
-		ret.Type = distsqlpb.BackfillerSpec_Column
-	default:
-		return distsqlpb.BackfillerSpec{}, errors.Errorf("bad backfill type %d", backfillType)
-	}
-	return ret, nil
+	indexesToBackfill []descpb.IndexID,
+) (execinfrapb.BackfillerSpec, error) {
+	return execinfrapb.BackfillerSpec{
+		Table:             desc,
+		WriteAsOf:         writeAsOf,
+		ReadAsOf:          readAsOf,
+		Type:              execinfrapb.BackfillerSpec_Index,
+		ChunkSize:         chunkSize,
+		IndexesToBackfill: indexesToBackfill,
+	}, nil
 }
 
 // createBackfiller generates a plan consisting of index/column backfiller
 // processors, one for each node that has spans that we are reading. The plan is
 // finalized.
-func (dsp *DistSQLPlanner) createBackfiller(
-	planCtx *PlanningCtx,
-	backfillType backfillType,
-	desc sqlbase.TableDescriptor,
-	duration time.Duration,
-	chunkSize int64,
-	spans []roachpb.Span,
-	otherTables []sqlbase.TableDescriptor,
-	readAsOf hlc.Timestamp,
-) (PhysicalPlan, error) {
-	spec, err := initBackfillerSpec(backfillType, desc, duration, chunkSize, otherTables, readAsOf)
-	if err != nil {
-		return PhysicalPlan{}, err
-	}
-
+func (dsp *DistSQLPlanner) createBackfillerPhysicalPlan(
+	planCtx *PlanningCtx, spec execinfrapb.BackfillerSpec, spans []roachpb.Span,
+) (*PhysicalPlan, error) {
 	spanPartitions, err := dsp.PartitionSpans(planCtx, spans)
 	if err != nil {
-		return PhysicalPlan{}, err
+		return nil, err
 	}
 
-	var p PhysicalPlan
-	p.ResultRouters = make([]distsqlplan.ProcessorIdx, len(spanPartitions))
+	p := planCtx.NewPhysicalPlan()
+	p.ResultRouters = make([]physicalplan.ProcessorIdx, len(spanPartitions))
 	for i, sp := range spanPartitions {
-		ib := &distsqlpb.BackfillerSpec{}
+		ib := &execinfrapb.BackfillerSpec{}
 		*ib = spec
-		ib.Spans = make([]distsqlpb.TableReaderSpan, len(sp.Spans))
+		ib.Spans = make([]execinfrapb.TableReaderSpan, len(sp.Spans))
 		for j := range sp.Spans {
 			ib.Spans[j].Span = sp.Spans[j]
 		}
 
-		proc := distsqlplan.Processor{
+		proc := physicalplan.Processor{
 			Node: sp.Node,
-			Spec: distsqlpb.ProcessorSpec{
-				Core:   distsqlpb.ProcessorCoreUnion{Backfiller: ib},
-				Output: []distsqlpb.OutputRouterSpec{{Type: distsqlpb.OutputRouterSpec_PASS_THROUGH}},
+			Spec: execinfrapb.ProcessorSpec{
+				Core:        execinfrapb.ProcessorCoreUnion{Backfiller: ib},
+				Output:      []execinfrapb.OutputRouterSpec{{Type: execinfrapb.OutputRouterSpec_PASS_THROUGH}},
+				ResultTypes: []*types.T{},
 			},
 		}
 
 		pIdx := p.AddProcessor(proc)
 		p.ResultRouters[i] = pIdx
 	}
-	dsp.FinalizePlan(planCtx, &p)
+	dsp.FinalizePlan(planCtx, p)
 	return p, nil
 }

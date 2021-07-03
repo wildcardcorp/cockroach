@@ -1,16 +1,12 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 /*
 Package lang implements a language called Optgen, short for "optimizer
@@ -106,7 +102,13 @@ rule has a unique name and consists of a match pattern and a corresponding
 replace pattern. A rule's match pattern is tested against every node in the
 target expression tree, bottom-up. Each matching node is replaced by a node
 constructed according to the replace pattern. The replacement node is itself
-tested against every rule, and so on, until no further rules match.
+tested against every rule, and so on, until no further rules match. The order
+that rules are applied depends on the order of the rules in each file, the
+lexicographical ordering of files, and whether or not a rule is marked as high
+or low priority as it is depicted below:
+
+[InlineConstVar, Normalize, HighPriority]
+
 
 Note that this is just a conceptual description. Optgen does not actually do
 any of this matching or replacing itself. Other components use the Optgen

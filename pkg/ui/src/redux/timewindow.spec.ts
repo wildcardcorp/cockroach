@@ -1,24 +1,20 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 import { assert } from "chai";
 import * as timewindow from "./timewindow";
 import moment from "moment";
 
-describe("time window reducer", function() {
-  describe("actions", function() {
-    it("should create the correct action to set the current time window", function() {
+describe("time window reducer", function () {
+  describe("actions", function () {
+    it("should create the correct action to set the current time window", function () {
       const start = moment();
       const end = start.add(10, "s");
       const expectedSetting = {
@@ -30,19 +26,20 @@ describe("time window reducer", function() {
       };
       assert.deepEqual(
         timewindow.setTimeWindow({ start, end }),
-        expectedSetting);
+        expectedSetting,
+      );
     });
 
-    it("should create the correct action to set time window settings", function() {
+    it("should create the correct action to set time window settings", function () {
       const payload: timewindow.TimeScale = {
         windowSize: moment.duration(10, "s"),
         windowValid: moment.duration(10, "s"),
         sampleSize: moment.duration(10, "s"),
       };
-      assert.deepEqual(
-        timewindow.setTimeScale(payload),
-        { type: timewindow.SET_SCALE, payload },
-      );
+      assert.deepEqual(timewindow.setTimeScale(payload), {
+        type: timewindow.SET_SCALE,
+        payload,
+      });
     });
   });
 
@@ -53,8 +50,8 @@ describe("time window reducer", function() {
         new timewindow.TimeWindowState(),
       );
       assert.deepEqual(
-        (new timewindow.TimeWindowState()).scale,
-        timewindow.availableTimeScales["10 min"],
+        new timewindow.TimeWindowState().scale,
+        timewindow.availableTimeScales["Past 10 Minutes"],
       );
     });
 
@@ -69,7 +66,10 @@ describe("time window reducer", function() {
         };
         expected.scaleChanged = false;
         assert.deepEqual(
-          timewindow.timeWindowReducer(undefined, timewindow.setTimeWindow({ start, end })),
+          timewindow.timeWindowReducer(
+            undefined,
+            timewindow.setTimeWindow({ start, end }),
+          ),
           expected,
         );
       });
@@ -88,12 +88,47 @@ describe("time window reducer", function() {
         };
         expected.scaleChanged = true;
         assert.deepEqual(
-          timewindow.timeWindowReducer(undefined, timewindow.setTimeScale({
-            windowSize: newSize,
-            windowValid: newValid,
-            sampleSize: newSample,
-          })),
+          timewindow.timeWindowReducer(
+            undefined,
+            timewindow.setTimeScale({
+              windowSize: newSize,
+              windowValid: newValid,
+              sampleSize: newSample,
+            }),
+          ),
           expected,
+        );
+      });
+    });
+    describe("findClosestTimeScale", () => {
+      it("should found correctly time scale", () => {
+        assert.deepEqual(timewindow.findClosestTimeScale(15), {
+          ...timewindow.availableTimeScales["Past 10 Minutes"],
+          key: "Custom",
+        });
+        assert.deepEqual(
+          timewindow.findClosestTimeScale(
+            moment.duration(10, "minutes").asSeconds(),
+          ),
+          {
+            ...timewindow.availableTimeScales["Past 10 Minutes"],
+            key: "Past 10 Minutes",
+          },
+        );
+        assert.deepEqual(
+          timewindow.findClosestTimeScale(
+            moment.duration(14, "days").asSeconds(),
+          ),
+          {
+            ...timewindow.availableTimeScales["Past 2 Weeks"],
+            key: "Past 2 Weeks",
+          },
+        );
+        assert.deepEqual(
+          timewindow.findClosestTimeScale(
+            moment.duration(moment().daysInMonth() * 5, "days").asSeconds(),
+          ),
+          { ...timewindow.availableTimeScales["Past 2 Months"], key: "Custom" },
         );
       });
     });

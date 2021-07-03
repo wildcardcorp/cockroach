@@ -1,22 +1,18 @@
 // Copyright 2015 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package bench
 
 import (
 	"bytes"
-	gosql "database/sql"
+	"context"
 	"fmt"
 	"math/rand"
 	"reflect"
@@ -26,6 +22,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
@@ -33,13 +30,10 @@ import (
 	_ "github.com/lib/pq"
 )
 
-func runBenchmarkSelect1(b *testing.B, db *gosql.DB) {
+func runBenchmarkSelect1(b *testing.B, db *sqlutils.SQLRunner) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		rows, err := db.Query(`SELECT 1`)
-		if err != nil {
-			b.Fatal(err)
-		}
+		rows := db.Query(b, `SELECT 1`)
 		rows.Close()
 	}
 	b.StopTimer()
@@ -51,17 +45,13 @@ func BenchmarkSelect1(b *testing.B) {
 }
 
 func runBenchmarkSelectWithTargetsAndFilter(
-	b *testing.B, db *gosql.DB, targets, filter string, args ...interface{},
+	b *testing.B, db *sqlutils.SQLRunner, targets, filter string, args ...interface{},
 ) {
 	defer func() {
-		if _, err := db.Exec(`DROP TABLE IF EXISTS bench.select`); err != nil {
-			b.Fatal(err)
-		}
+		db.Exec(b, `DROP TABLE IF EXISTS bench.select`)
 	}()
 
-	if _, err := db.Exec(`CREATE TABLE bench.select (k INT PRIMARY KEY, a INT, b INT, c INT, d INT)`); err != nil {
-		b.Fatal(err)
-	}
+	db.Exec(b, `CREATE TABLE bench.select (k INT PRIMARY KEY, a INT, b INT, c INT, d INT)`)
 
 	var buf bytes.Buffer
 	buf.WriteString(`INSERT INTO bench.select VALUES `)
@@ -82,63 +72,48 @@ func runBenchmarkSelectWithTargetsAndFilter(
 			}
 		}
 	}
-	if _, err := db.Exec(buf.String()); err != nil {
-		b.Fatal(err)
-	}
+	db.Exec(b, buf.String())
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		rows, err := db.Query(fmt.Sprintf(`SELECT %s FROM bench.select WHERE %s`, targets, filter), args...)
-		if err != nil {
-			b.Fatal(err)
-		}
+		rows := db.Query(b, fmt.Sprintf(`SELECT %s FROM bench.select WHERE %s`, targets, filter), args...)
 		rows.Close()
 	}
 	b.StopTimer()
 }
 
-// runBenchmarkSelect2 runs a SELECT query with non-trivial expressions. The main purpose is to
-// detect major regressions in query expression processing.
-func runBenchmarkSelect2(b *testing.B, db *gosql.DB) {
-	targets := `a, b, c, a+b, a+1, (a+2)*(b+3)*(c+4)`
-	filter := `(a = 1) OR ((a = 2) and (b = c)) OR (a + b = 3) OR (2*a + 4*b = 4*c)`
-	runBenchmarkSelectWithTargetsAndFilter(b, db, targets, filter)
-}
-
+// BenchmarkSelect2 runs a SELECT query with non-trivial expressions. The main
+// purpose is to detect major regressions in query expression processing.
 func BenchmarkSelect2(b *testing.B) {
 	defer log.Scope(b).Close(b)
-	ForEachDB(b, runBenchmarkSelect2)
+	ForEachDB(b, func(b *testing.B, db *sqlutils.SQLRunner) {
+		targets := `a, b, c, a+b, a+1, (a+2)*(b+3)*(c+4)`
+		filter := `(a = 1) OR ((a = 2) and (b = c)) OR (a + b = 3) OR (2*a + 4*b = 4*c)`
+		runBenchmarkSelectWithTargetsAndFilter(b, db, targets, filter)
+	})
 }
 
-// runBenchmarkSelect3 runs a SELECT query with non-trivial expressions. The main purpose is to
-// quantify regressions in numeric type processing.
-func runBenchmarkSelect3(b *testing.B, db *gosql.DB) {
-	targets := `a/b, b/c, c != 3.3 + $1, a = 2.0, c * 9.0`
-	filter := `a > 1 AND b < 4.5`
-	args := []interface{}{1.0}
-	runBenchmarkSelectWithTargetsAndFilter(b, db, targets, filter, args...)
-}
-
+// BenchmarkSelect3 runs a SELECT query with non-trivial expressions. The main
+// purpose is to quantify regressions in numeric type processing.
 func BenchmarkSelect3(b *testing.B) {
 	defer log.Scope(b).Close(b)
-	ForEachDB(b, runBenchmarkSelect3)
+	ForEachDB(b, func(b *testing.B, db *sqlutils.SQLRunner) {
+		targets := `a/b, b/c, c != 3.3 + $1, a = 2.0, c * 9.0`
+		filter := `a > 1 AND b < 4.5`
+		args := []interface{}{1.0}
+		runBenchmarkSelectWithTargetsAndFilter(b, db, targets, filter, args...)
+	})
 }
 
 func BenchmarkCount(b *testing.B) {
-	if testing.Short() {
-		b.Skip("short flag")
-	}
+	skip.UnderShort(b)
 	defer log.Scope(b).Close(b)
-	ForEachDB(b, func(b *testing.B, db *gosql.DB) {
+	ForEachDB(b, func(b *testing.B, db *sqlutils.SQLRunner) {
 		defer func() {
-			if _, err := db.Exec(`DROP TABLE IF EXISTS bench.count`); err != nil {
-				b.Fatal(err)
-			}
+			db.Exec(b, `DROP TABLE IF EXISTS bench.count`)
 		}()
 
-		if _, err := db.Exec(`CREATE TABLE bench.count (k INT PRIMARY KEY, v TEXT)`); err != nil {
-			b.Fatal(err)
-		}
+		db.Exec(b, `CREATE TABLE bench.count (k INT PRIMARY KEY, v TEXT)`)
 
 		var buf bytes.Buffer
 		val := 0
@@ -152,37 +127,61 @@ func BenchmarkCount(b *testing.B) {
 				fmt.Fprintf(&buf, "(%d, '%s')", val, strconv.Itoa(val))
 				val++
 			}
-			if _, err := db.Exec(buf.String()); err != nil {
-				b.Fatal(err)
-			}
+			db.Exec(b, buf.String())
 		}
 
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			if _, err := db.Exec("SELECT count(*) FROM bench.count"); err != nil {
-				b.Fatal(err)
+			db.Exec(b, "SELECT count(*) FROM bench.count")
+		}
+		b.StopTimer()
+	})
+}
+
+func BenchmarkCountTwoCF(b *testing.B) {
+	skip.UnderShort(b)
+	defer log.Scope(b).Close(b)
+	ForEachDB(b, func(b *testing.B, db *sqlutils.SQLRunner) {
+		defer func() {
+			db.Exec(b, `DROP TABLE IF EXISTS bench.count`)
+		}()
+
+		db.Exec(b, `CREATE TABLE bench.count (k INT PRIMARY KEY, v TEXT, FAMILY (k), FAMILY (v))`)
+
+		var buf bytes.Buffer
+		val := 0
+		for i := 0; i < 100; i++ {
+			buf.Reset()
+			buf.WriteString(`INSERT INTO bench.count VALUES `)
+			for j := 0; j < 1000; j++ {
+				if j > 0 {
+					buf.WriteString(", ")
+				}
+				fmt.Fprintf(&buf, "(%d, '%s')", val, strconv.Itoa(val))
+				val++
 			}
+			db.Exec(b, buf.String())
+		}
+
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			db.Exec(b, "SELECT count(*) FROM bench.count")
 		}
 		b.StopTimer()
 	})
 }
 
 func BenchmarkSort(b *testing.B) {
-	if testing.Short() {
-		b.Skip("short flag")
-	}
+	skip.UnderShort(b)
 	defer log.Scope(b).Close(b)
-	ForEachDB(b, func(b *testing.B, db *gosql.DB) {
+	ForEachDB(b, func(b *testing.B, db *sqlutils.SQLRunner) {
 		defer func() {
-			if _, err := db.Exec(`DROP TABLE IF EXISTS bench.sort`); err != nil {
-				b.Fatal(err)
-			}
+			db.Exec(b, `DROP TABLE IF EXISTS bench.sort`)
 		}()
 
-		if _, err := db.Exec(`CREATE TABLE bench.sort (k INT PRIMARY KEY, v INT)`); err != nil {
-			b.Fatal(err)
-		}
+		db.Exec(b, `CREATE TABLE bench.sort (k INT PRIMARY KEY, v INT)`)
 
 		var buf bytes.Buffer
 		val := 0
@@ -196,33 +195,82 @@ func BenchmarkSort(b *testing.B) {
 				fmt.Fprintf(&buf, "(%d, %d)", val, -val)
 				val++
 			}
-			if _, err := db.Exec(buf.String()); err != nil {
-				b.Fatal(err)
-			}
+			db.Exec(b, buf.String())
 		}
 
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			if _, err := db.Exec("SELECT * FROM bench.sort ORDER BY v"); err != nil {
-				b.Fatal(err)
-			}
+			db.Exec(b, "SELECT * FROM bench.sort ORDER BY v")
 		}
 		b.StopTimer()
 	})
 }
 
+// BenchmarkTableResolution benchmarks table name resolution
+// for a variety of different naming schemes.
+func BenchmarkTableResolution(b *testing.B) {
+	skip.UnderShort(b)
+	defer log.Scope(b).Close(b)
+
+	for _, createTempTables := range []bool{false, true} {
+		b.Run(fmt.Sprintf("temp_schema_exists:%t", createTempTables), func(b *testing.B) {
+			benchmarkCockroach(b, func(b *testing.B, db *sqlutils.SQLRunner) {
+				defer func() {
+					db.Exec(b, `DROP TABLE IF EXISTS bench.tbl`)
+					if createTempTables {
+						db.Exec(b, `DROP TABLE IF EXISTS bench.pg_temp.temp_tbl`)
+					}
+				}()
+
+				db.Exec(b, `
+			USE bench;
+			CREATE TABLE tbl (k INT PRIMARY KEY, v INT);
+		`)
+
+				type benchCase struct {
+					desc    string
+					tblName string
+				}
+				cases := []benchCase{
+					{"table", "tbl"},
+					{"database.table", "bench.tbl"},
+					{"database.public.table", "bench.public.tbl"},
+					{"public.table", "public.tbl"},
+				}
+				if createTempTables {
+					db.Exec(b, `
+						SET experimental_enable_temp_tables=true;
+						CREATE TEMP TABLE temp_tbl (k INT PRIMARY KEY);
+					`)
+					cases = append(cases, []benchCase{
+						{"temp_table", "temp_tbl"},
+						{"database.pg_temp.table", "bench.pg_temp.temp_tbl"},
+						{"pg_temp.table", "pg_temp.temp_tbl"},
+					}...)
+				}
+				for _, c := range cases {
+					b.Run(c.desc, func(b *testing.B) {
+						query := "SELECT * FROM " + c.tblName
+						b.ResetTimer()
+						for i := 0; i < b.N; i++ {
+							db.Exec(b, query)
+						}
+						b.StopTimer()
+					})
+				}
+			})
+		})
+	}
+}
+
 // runBenchmarkInsert benchmarks inserting count rows into a table.
-func runBenchmarkInsert(b *testing.B, db *gosql.DB, count int) {
+func runBenchmarkInsert(b *testing.B, db *sqlutils.SQLRunner, count int) {
 	defer func() {
-		if _, err := db.Exec(`DROP TABLE IF EXISTS bench.insert`); err != nil {
-			b.Fatal(err)
-		}
+		db.Exec(b, `DROP TABLE IF EXISTS bench.insert`)
 	}()
 
-	if _, err := db.Exec(`CREATE TABLE bench.insert (k INT PRIMARY KEY)`); err != nil {
-		b.Fatal(err)
-	}
+	db.Exec(b, `CREATE TABLE bench.insert (k INT PRIMARY KEY)`)
 
 	b.ResetTimer()
 	var buf bytes.Buffer
@@ -237,9 +285,7 @@ func runBenchmarkInsert(b *testing.B, db *gosql.DB, count int) {
 			fmt.Fprintf(&buf, "(%d)", val)
 			val++
 		}
-		if _, err := db.Exec(buf.String()); err != nil {
-			b.Fatal(err)
-		}
+		db.Exec(b, buf.String())
 	}
 	b.StopTimer()
 
@@ -247,7 +293,7 @@ func runBenchmarkInsert(b *testing.B, db *gosql.DB, count int) {
 
 // runBenchmarkInsertFK benchmarks inserting count rows into a table with a
 // present foreign key into another table.
-func runBenchmarkInsertFK(b *testing.B, db *gosql.DB, count int) {
+func runBenchmarkInsertFK(b *testing.B, db *sqlutils.SQLRunner, count int) {
 	for _, nFks := range []int{1, 5, 10} {
 		b.Run(fmt.Sprintf("nFks=%d", nFks), func(b *testing.B) {
 			defer func() {
@@ -255,18 +301,12 @@ func runBenchmarkInsertFK(b *testing.B, db *gosql.DB, count int) {
 				for i := 0; i < nFks; i++ {
 					dropStmt += fmt.Sprintf(",bench.fk%d", i)
 				}
-				if _, err := db.Exec(dropStmt); err != nil {
-					b.Fatal(err)
-				}
+				db.Exec(b, dropStmt)
 			}()
 
 			for i := 0; i < nFks; i++ {
-				if _, err := db.Exec(fmt.Sprintf(`CREATE TABLE bench.fk%d (k INT PRIMARY KEY)`, i)); err != nil {
-					b.Fatal(err)
-				}
-				if _, err := db.Exec(fmt.Sprintf(`INSERT INTO bench.fk%d VALUES(1), (2), (3)`, i)); err != nil {
-					b.Fatal(err)
-				}
+				db.Exec(b, fmt.Sprintf(`CREATE TABLE bench.fk%d (k INT PRIMARY KEY)`, i))
+				db.Exec(b, fmt.Sprintf(`INSERT INTO bench.fk%d VALUES(1), (2), (3)`, i))
 			}
 
 			createStmt := `CREATE TABLE bench.insert (k INT PRIMARY KEY`
@@ -277,9 +317,7 @@ func runBenchmarkInsertFK(b *testing.B, db *gosql.DB, count int) {
 			}
 			createStmt += ")"
 			valuesStr += ")"
-			if _, err := db.Exec(createStmt); err != nil {
-				b.Fatal(err)
-			}
+			db.Exec(b, createStmt)
 
 			b.ResetTimer()
 			var buf bytes.Buffer
@@ -294,9 +332,7 @@ func runBenchmarkInsertFK(b *testing.B, db *gosql.DB, count int) {
 					fmt.Fprintf(&buf, valuesStr, val)
 					val++
 				}
-				if _, err := db.Exec(buf.String()); err != nil {
-					b.Fatal(err)
-				}
+				db.Exec(b, buf.String())
 			}
 			b.StopTimer()
 
@@ -306,21 +342,15 @@ func runBenchmarkInsertFK(b *testing.B, db *gosql.DB, count int) {
 
 // runBenchmarkInsertSecondaryIndex benchmarks inserting count rows into a table with a
 // secondary index.
-func runBenchmarkInsertSecondaryIndex(b *testing.B, db *gosql.DB, count int) {
+func runBenchmarkInsertSecondaryIndex(b *testing.B, db *sqlutils.SQLRunner, count int) {
 	defer func() {
-		if _, err := db.Exec(`DROP TABLE IF EXISTS bench.insert`); err != nil {
-			b.Fatal(err)
-		}
+		db.Exec(b, `DROP TABLE IF EXISTS bench.insert`)
 	}()
 
-	if _, err := db.Exec(`CREATE TABLE bench.insert (k INT PRIMARY KEY, v INT,  INDEX(v))`); err != nil {
-		b.Fatal(err)
-	}
+	db.Exec(b, `CREATE TABLE bench.insert (k INT PRIMARY KEY, v INT,  INDEX(v))`)
 
 	for i := 0; i < 10; i++ {
-		if _, err := db.Exec(`CREATE INDEX ON bench.insert (v)`); err != nil {
-			b.Fatal(err)
-		}
+		db.Exec(b, `CREATE INDEX ON bench.insert (v)`)
 	}
 
 	b.ResetTimer()
@@ -336,26 +366,23 @@ func runBenchmarkInsertSecondaryIndex(b *testing.B, db *gosql.DB, count int) {
 			fmt.Fprintf(&buf, "(%d, %d)", val, val)
 			val++
 		}
-		if _, err := db.Exec(buf.String()); err != nil {
-			b.Fatal(err)
-		}
+		db.Exec(b, buf.String())
 	}
 	b.StopTimer()
 }
 
 func BenchmarkSQL(b *testing.B) {
-	if testing.Short() {
-		b.Skip("short flag")
-	}
+	skip.UnderShort(b)
 	defer log.Scope(b).Close(b)
-	ForEachDB(b, func(b *testing.B, db *gosql.DB) {
-		for _, runFn := range []func(*testing.B, *gosql.DB, int){
+	ForEachDB(b, func(b *testing.B, db *sqlutils.SQLRunner) {
+		for _, runFn := range []func(*testing.B, *sqlutils.SQLRunner, int){
 			runBenchmarkDelete,
 			runBenchmarkInsert,
 			runBenchmarkInsertDistinct,
 			runBenchmarkInsertFK,
 			runBenchmarkInsertSecondaryIndex,
 			runBenchmarkInterleavedSelect,
+			runBenchmarkInterleavedFK,
 			runBenchmarkTrackChoices,
 			runBenchmarkUpdate,
 			runBenchmarkUpsert,
@@ -373,18 +400,61 @@ func BenchmarkSQL(b *testing.B) {
 	})
 }
 
+// BenchmarkTracing measures the overhead of always-on tracing. It also reports
+// the memory utilization.
+//
+// TODO(irfansharif): This benchmark is only useful while we transition between
+// the legacy trace.mode, and the "always-on" mode introduced in 21.1. We can
+// remove it in 21.2.
+func BenchmarkTracing(b *testing.B) {
+	skip.UnderShort(b)
+	defer log.Scope(b).Close(b)
+
+	for _, dbFn := range []func(*testing.B, BenchmarkFn){
+		benchmarkCockroach,
+		benchmarkMultinodeCockroach,
+	} {
+		dbName := runtime.FuncForPC(reflect.ValueOf(dbFn).Pointer()).Name()
+		dbName = strings.TrimPrefix(dbName, "github.com/cockroachdb/cockroach/pkg/bench.benchmark")
+
+		b.Run(dbName, func(b *testing.B) {
+			dbFn(b, func(b *testing.B, db *sqlutils.SQLRunner) {
+				for _, tracingEnabled := range []bool{true, false} {
+					var tracingMode string
+					if tracingEnabled {
+						tracingMode = "background"
+					} else {
+						tracingMode = "legacy"
+					}
+					db.Exec(b, fmt.Sprintf("SET CLUSTER SETTING trace.mode = %s", tracingMode))
+					b.Run(fmt.Sprintf("tracing=%s", tracingMode[:1]), func(b *testing.B) {
+						for _, runFn := range []func(*testing.B, *sqlutils.SQLRunner, int){
+							runBenchmarkScan1,
+							runBenchmarkInsert,
+						} {
+							fnName := runtime.FuncForPC(reflect.ValueOf(runFn).Pointer()).Name()
+							fnName = strings.TrimPrefix(fnName, "github.com/cockroachdb/cockroach/pkg/bench.runBenchmark")
+							b.Run(fnName, func(b *testing.B) {
+								b.ReportAllocs()
+
+								runFn(b, db, 1 /* count */)
+							})
+						}
+					})
+				}
+			})
+		})
+	}
+}
+
 // runBenchmarkUpdate benchmarks updating count random rows in a table.
-func runBenchmarkUpdate(b *testing.B, db *gosql.DB, count int) {
+func runBenchmarkUpdate(b *testing.B, db *sqlutils.SQLRunner, count int) {
 	defer func() {
-		if _, err := db.Exec(`DROP TABLE IF EXISTS bench.update`); err != nil {
-			b.Fatal(err)
-		}
+		db.Exec(b, `DROP TABLE IF EXISTS bench.update`)
 	}()
 
 	const rows = 10000
-	if _, err := db.Exec(`CREATE TABLE bench.update (k INT PRIMARY KEY, v INT)`); err != nil {
-		b.Fatal(err)
-	}
+	db.Exec(b, `CREATE TABLE bench.update (k INT PRIMARY KEY, v INT)`)
 
 	var buf bytes.Buffer
 	buf.WriteString(`INSERT INTO bench.update VALUES `)
@@ -394,9 +464,7 @@ func runBenchmarkUpdate(b *testing.B, db *gosql.DB, count int) {
 		}
 		fmt.Fprintf(&buf, "(%d, %d)", i, i)
 	}
-	if _, err := db.Exec(buf.String()); err != nil {
-		b.Fatal(err)
-	}
+	db.Exec(b, buf.String())
 
 	s := rand.New(rand.NewSource(5432))
 
@@ -411,24 +479,18 @@ func runBenchmarkUpdate(b *testing.B, db *gosql.DB, count int) {
 			fmt.Fprintf(&buf, `%d`, s.Intn(rows))
 		}
 		buf.WriteString(`)`)
-		if _, err := db.Exec(buf.String()); err != nil {
-			b.Fatal(err)
-		}
+		db.Exec(b, buf.String())
 	}
 	b.StopTimer()
 }
 
 // runBenchmarkUpsert benchmarks upserting count rows in a table.
-func runBenchmarkUpsert(b *testing.B, db *gosql.DB, count int) {
+func runBenchmarkUpsert(b *testing.B, db *sqlutils.SQLRunner, count int) {
 	defer func() {
-		if _, err := db.Exec(`DROP TABLE IF EXISTS bench.upsert`); err != nil {
-			b.Fatal(err)
-		}
+		db.Exec(b, `DROP TABLE IF EXISTS bench.upsert`)
 	}()
 
-	if _, err := db.Exec(`CREATE TABLE bench.upsert (k INT PRIMARY KEY, v INT)`); err != nil {
-		b.Fatal(err)
-	}
+	db.Exec(b, `CREATE TABLE bench.upsert (k INT PRIMARY KEY, v INT)`)
 
 	// Upsert in Cockroach doesn't let you conflict the same row twice in one
 	// statement (fwiw, neither does Postgres), so build one statement that
@@ -447,28 +509,20 @@ func runBenchmarkUpsert(b *testing.B, db *gosql.DB, count int) {
 	b.ResetTimer()
 	key := 0
 	for i := 0; i < b.N; i++ {
-		if _, err := db.Exec(upsertBuf.String(), key); err != nil {
-			b.Fatal(err)
-		}
-		if _, err := db.Exec(upsertBuf.String(), key); err != nil {
-			b.Fatal(err)
-		}
+		db.Exec(b, upsertBuf.String(), key)
+		db.Exec(b, upsertBuf.String(), key)
 		key += count
 	}
 	b.StopTimer()
 }
 
 // runBenchmarkDelete benchmarks deleting count rows from a table.
-func runBenchmarkDelete(b *testing.B, db *gosql.DB, rows int) {
+func runBenchmarkDelete(b *testing.B, db *sqlutils.SQLRunner, rows int) {
 	defer func() {
-		if _, err := db.Exec(`DROP TABLE IF EXISTS bench.delete`); err != nil {
-			b.Fatal(err)
-		}
+		db.Exec(b, `DROP TABLE IF EXISTS bench.delete`)
 	}()
 
-	if _, err := db.Exec(`CREATE TABLE bench.delete (k INT PRIMARY KEY, v1 INT, v2 INT, v3 INT)`); err != nil {
-		b.Fatal(err)
-	}
+	db.Exec(b, `CREATE TABLE bench.delete (k INT PRIMARY KEY, v1 INT, v2 INT, v3 INT)`)
 
 	b.ResetTimer()
 	var buf bytes.Buffer
@@ -482,9 +536,7 @@ func runBenchmarkDelete(b *testing.B, db *gosql.DB, rows int) {
 			}
 			fmt.Fprintf(&buf, "(%d, %d, %d, %d)", j, j, j, j)
 		}
-		if _, err := db.Exec(buf.String()); err != nil {
-			b.Fatal(err)
-		}
+		db.Exec(b, buf.String())
 		b.StartTimer()
 
 		buf.Reset()
@@ -496,24 +548,22 @@ func runBenchmarkDelete(b *testing.B, db *gosql.DB, rows int) {
 			fmt.Fprintf(&buf, `%d`, j)
 		}
 		buf.WriteString(`)`)
-		if _, err := db.Exec(buf.String()); err != nil {
-			b.Fatal(err)
-		}
+		db.Exec(b, buf.String())
 	}
 	b.StopTimer()
 }
 
+func runBenchmarkScan1(b *testing.B, db *sqlutils.SQLRunner, count int) {
+	runBenchmarkScan(b, db, count, 1)
+}
+
 // runBenchmarkScan benchmarks scanning a table containing count rows.
-func runBenchmarkScan(b *testing.B, db *gosql.DB, count int, limit int) {
+func runBenchmarkScan(b *testing.B, db *sqlutils.SQLRunner, count int, limit int) {
 	defer func() {
-		if _, err := db.Exec(`DROP TABLE IF EXISTS bench.scan`); err != nil {
-			b.Fatal(err)
-		}
+		db.Exec(b, `DROP TABLE IF EXISTS bench.scan`)
 	}()
 
-	if _, err := db.Exec(`CREATE TABLE bench.scan (k INT PRIMARY KEY)`); err != nil {
-		b.Fatal(err)
-	}
+	db.Exec(b, `CREATE TABLE bench.scan (k INT PRIMARY KEY)`)
 
 	var buf bytes.Buffer
 	buf.WriteString(`INSERT INTO bench.scan VALUES `)
@@ -523,9 +573,7 @@ func runBenchmarkScan(b *testing.B, db *gosql.DB, count int, limit int) {
 		}
 		fmt.Fprintf(&buf, "(%d)", i)
 	}
-	if _, err := db.Exec(buf.String()); err != nil {
-		b.Fatal(err)
-	}
+	db.Exec(b, buf.String())
 
 	query := `SELECT * FROM bench.scan`
 	if limit != 0 {
@@ -534,10 +582,7 @@ func runBenchmarkScan(b *testing.B, db *gosql.DB, count int, limit int) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		rows, err := db.Query(query)
-		if err != nil {
-			b.Fatal(err)
-		}
+		rows := db.Query(b, query)
 		n := 0
 		for rows.Next() {
 			n++
@@ -558,11 +603,9 @@ func runBenchmarkScan(b *testing.B, db *gosql.DB, count int, limit int) {
 }
 
 func BenchmarkScan(b *testing.B) {
-	if testing.Short() {
-		b.Skip("short flag")
-	}
+	skip.UnderShort(b)
 	defer log.Scope(b).Close(b)
-	ForEachDB(b, func(b *testing.B, db *gosql.DB) {
+	ForEachDB(b, func(b *testing.B, db *sqlutils.SQLRunner) {
 		for _, count := range []int{1, 10, 100, 1000, 10000} {
 			b.Run(fmt.Sprintf("count=%d", count), func(b *testing.B) {
 				for _, limit := range []int{0, 1, 10, 100} {
@@ -577,17 +620,13 @@ func BenchmarkScan(b *testing.B) {
 
 // runBenchmarkScanFilter benchmarks scanning (w/filter) from a table containing count1 * count2 rows.
 func runBenchmarkScanFilter(
-	b *testing.B, db *gosql.DB, count1, count2 int, limit int, filter string,
+	b *testing.B, db *sqlutils.SQLRunner, count1, count2 int, limit int, filter string,
 ) {
 	defer func() {
-		if _, err := db.Exec(`DROP TABLE IF EXISTS bench.scan2`); err != nil {
-			b.Fatal(err)
-		}
+		db.Exec(b, `DROP TABLE IF EXISTS bench.scan2`)
 	}()
 
-	if _, err := db.Exec(`CREATE TABLE bench.scan2 (a INT, b INT, PRIMARY KEY (a, b))`); err != nil {
-		b.Fatal(err)
-	}
+	db.Exec(b, `CREATE TABLE bench.scan2 (a INT, b INT, PRIMARY KEY (a, b))`)
 
 	var buf bytes.Buffer
 	buf.WriteString(`INSERT INTO bench.scan2 VALUES `)
@@ -599,9 +638,7 @@ func runBenchmarkScanFilter(
 			fmt.Fprintf(&buf, "(%d, %d)", i, j)
 		}
 	}
-	if _, err := db.Exec(buf.String()); err != nil {
-		b.Fatal(err)
-	}
+	db.Exec(b, buf.String())
 
 	query := fmt.Sprintf(`SELECT * FROM bench.scan2 WHERE %s`, filter)
 	if limit != 0 {
@@ -610,10 +647,7 @@ func runBenchmarkScanFilter(
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		rows, err := db.Query(query)
-		if err != nil {
-			b.Fatal(err)
-		}
+		rows := db.Query(b, query)
 		n := 0
 		for rows.Next() {
 			n++
@@ -630,7 +664,7 @@ func BenchmarkScanFilter(b *testing.B) {
 	defer log.Scope(b).Close(b)
 	const count1 = 25
 	const count2 = 400
-	ForEachDB(b, func(b *testing.B, db *gosql.DB) {
+	ForEachDB(b, func(b *testing.B, db *sqlutils.SQLRunner) {
 		b.Run(fmt.Sprintf("count1=%d", count1), func(b *testing.B) {
 			b.Run(fmt.Sprintf("count2=%d", count2), func(b *testing.B) {
 				for _, limit := range []int{1, 10, 50} {
@@ -647,22 +681,14 @@ func BenchmarkScanFilter(b *testing.B) {
 	})
 }
 
-func runBenchmarkInterleavedSelect(b *testing.B, db *gosql.DB, count int) {
+func runBenchmarkInterleavedSelect(b *testing.B, db *sqlutils.SQLRunner, count int) {
 	defer func() {
-		if _, err := db.Exec(`DROP TABLE IF EXISTS bench.interleaved_select2`); err != nil {
-			b.Fatal(err)
-		}
-		if _, err := db.Exec(`DROP TABLE IF EXISTS bench.interleaved_select1`); err != nil {
-			b.Fatal(err)
-		}
+		db.Exec(b, `DROP TABLE IF EXISTS bench.interleaved_select2`)
+		db.Exec(b, `DROP TABLE IF EXISTS bench.interleaved_select1`)
 	}()
 
-	if _, err := db.Exec(`CREATE TABLE bench.interleaved_select1 (a INT PRIMARY KEY, b INT)`); err != nil {
-		b.Fatal(err)
-	}
-	if _, err := db.Exec(`CREATE TABLE bench.interleaved_select2 (c INT PRIMARY KEY, d INT) INTERLEAVE IN PARENT interleaved_select1 (c)`); err != nil {
-		b.Fatal(err)
-	}
+	db.Exec(b, `CREATE TABLE bench.interleaved_select1 (a INT PRIMARY KEY, b INT)`)
+	db.Exec(b, `CREATE TABLE bench.interleaved_select2 (c INT PRIMARY KEY, d INT) INTERLEAVE IN PARENT interleaved_select1 (c)`)
 
 	const interleaveFreq = 4
 
@@ -682,21 +708,14 @@ func runBenchmarkInterleavedSelect(b *testing.B, db *gosql.DB, count int) {
 			fmt.Fprintf(&buf2, "(%d, %d)", i, i)
 		}
 	}
-	if _, err := db.Exec(buf1.String()); err != nil {
-		b.Fatal(err)
-	}
-	if _, err := db.Exec(buf2.String()); err != nil {
-		b.Fatal(err)
-	}
+	db.Exec(b, buf1.String())
+	db.Exec(b, buf2.String())
 
 	query := `SELECT * FROM bench.interleaved_select1 is1 INNER JOIN bench.interleaved_select2 is2 on is1.a = is2.c`
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		rows, err := db.Query(query)
-		if err != nil {
-			b.Fatal(err)
-		}
+		rows := db.Query(b, query)
 		n := 0
 		for rows.Next() {
 			n++
@@ -713,17 +732,46 @@ func runBenchmarkInterleavedSelect(b *testing.B, db *gosql.DB, count int) {
 	b.StopTimer()
 }
 
-// runBenchmarkOrderBy benchmarks scanning a table and sorting the results.
-func runBenchmarkOrderBy(b *testing.B, db *gosql.DB, count int, limit int, distinct bool) {
+func runBenchmarkInterleavedFK(b *testing.B, db *sqlutils.SQLRunner, count int) {
 	defer func() {
-		if _, err := db.Exec(`DROP TABLE IF EXISTS bench.sort`); err != nil {
-			b.Fatal(err)
-		}
+		db.Exec(b, `DROP TABLE IF EXISTS bench.parent CASCADE; DROP TABLE IF EXISTS bench.child CASCADE`)
 	}()
 
-	if _, err := db.Exec(`CREATE TABLE bench.sort (k INT PRIMARY KEY, v INT, w INT)`); err != nil {
-		b.Fatal(err)
+	db.Exec(b, `
+CREATE TABLE bench.parent (a INT PRIMARY KEY);
+INSERT INTO bench.parent VALUES(0);
+CREATE TABLE bench.child
+  (a INT REFERENCES bench.parent(a),
+   b INT, PRIMARY KEY(a, b))
+INTERLEAVE IN PARENT bench.parent (a)
+`)
+
+	b.ResetTimer()
+	var buf bytes.Buffer
+	val := 0
+	for i := 0; i < b.N; i++ {
+		buf.Reset()
+		buf.WriteString(`INSERT INTO bench.child VALUES `)
+		for j := 0; j < count; j++ {
+			if j > 0 {
+				buf.WriteString(", ")
+			}
+			fmt.Fprintf(&buf, "(0, %d)", val)
+			val++
+		}
+		db.Exec(b, buf.String())
 	}
+}
+
+// runBenchmarkOrderBy benchmarks scanning a table and sorting the results.
+func runBenchmarkOrderBy(
+	b *testing.B, db *sqlutils.SQLRunner, count int, limit int, distinct bool,
+) {
+	defer func() {
+		db.Exec(b, `DROP TABLE IF EXISTS bench.sort`)
+	}()
+
+	db.Exec(b, `CREATE TABLE bench.sort (k INT PRIMARY KEY, v INT, w INT)`)
 
 	var buf bytes.Buffer
 	buf.WriteString(`INSERT INTO bench.sort VALUES `)
@@ -733,9 +781,7 @@ func runBenchmarkOrderBy(b *testing.B, db *gosql.DB, count int, limit int, disti
 		}
 		fmt.Fprintf(&buf, "(%d, %d, %d)", i, i%(count*4/limit), i%2)
 	}
-	if _, err := db.Exec(buf.String()); err != nil {
-		b.Fatal(err)
-	}
+	db.Exec(b, buf.String())
 
 	var dist string
 	if distinct {
@@ -748,10 +794,7 @@ func runBenchmarkOrderBy(b *testing.B, db *gosql.DB, count int, limit int, disti
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		rows, err := db.Query(query)
-		if err != nil {
-			b.Fatal(err)
-		}
+		rows := db.Query(b, query)
 		n := 0
 		for rows.Next() {
 			n++
@@ -772,13 +815,11 @@ func runBenchmarkOrderBy(b *testing.B, db *gosql.DB, count int, limit int, disti
 }
 
 func BenchmarkOrderBy(b *testing.B) {
-	if testing.Short() {
-		b.Skip("short flag")
-	}
+	skip.UnderShort(b)
 	defer log.Scope(b).Close(b)
 	const count = 100000
 	const limit = 10
-	ForEachDB(b, func(b *testing.B, db *gosql.DB) {
+	ForEachDB(b, func(b *testing.B, db *sqlutils.SQLRunner) {
 		b.Run(fmt.Sprintf("count=%d", count), func(b *testing.B) {
 			b.Run(fmt.Sprintf("limit=%d", limit), func(b *testing.B) {
 				for _, distinct := range []bool{false, true} {
@@ -791,11 +832,9 @@ func BenchmarkOrderBy(b *testing.B) {
 	})
 }
 
-func runBenchmarkTrackChoices(b *testing.B, db *gosql.DB, batchSize int) {
+func runBenchmarkTrackChoices(b *testing.B, db *sqlutils.SQLRunner, batchSize int) {
 	defer func() {
-		if _, err := db.Exec(`DROP TABLE IF EXISTS bench.track_choices`); err != nil {
-			b.Fatal(err)
-		}
+		db.Exec(b, `DROP TABLE IF EXISTS bench.track_choices`)
 	}()
 
 	const numOptions = 10000
@@ -811,9 +850,7 @@ CREATE TABLE bench.track_choices (
 CREATE INDEX user_created_at ON bench.track_choices (user_id, created_at);
 CREATE INDEX track_created_at ON bench.track_choices (track_id, created_at);
 `
-	if _, err := db.Exec(createStmt); err != nil {
-		b.Fatal(err)
-	}
+	db.Exec(b, createStmt)
 
 	b.ResetTimer()
 	var buf bytes.Buffer
@@ -830,9 +867,7 @@ CREATE INDEX track_created_at ON bench.track_choices (track_id, created_at);
 			}
 			fmt.Fprintf(&buf, "(%d, %d, now())", rand.Int63(), rand.Int63n(numOptions))
 		}
-		if _, err := db.Exec(buf.String()); err != nil {
-			b.Fatal(err)
-		}
+		db.Exec(b, buf.String())
 	}
 	b.StopTimer()
 }
@@ -840,11 +875,9 @@ CREATE INDEX track_created_at ON bench.track_choices (track_id, created_at);
 // Benchmark inserting distinct rows in batches where the min and max rows in
 // separate batches overlap. This stresses the spanlatch manager implementation
 // and verifies that we're allowing parallel execution of commands where possible.
-func runBenchmarkInsertDistinct(b *testing.B, db *gosql.DB, numUsers int) {
+func runBenchmarkInsertDistinct(b *testing.B, db *sqlutils.SQLRunner, numUsers int) {
 	defer func() {
-		if _, err := db.Exec(`DROP TABLE IF EXISTS bench.insert_distinct`); err != nil {
-			b.Fatal(err)
-		}
+		db.Exec(b, `DROP TABLE IF EXISTS bench.insert_distinct`)
 	}()
 
 	const schema = `
@@ -854,9 +887,7 @@ CREATE TABLE bench.insert_distinct (
   uniqueID INT DEFAULT unique_rowid(),
   PRIMARY KEY (articleID, userID, uniqueID))
 `
-	if _, err := db.Exec(schema); err != nil {
-		b.Fatal(err)
-	}
+	db.Exec(b, schema)
 
 	b.ResetTimer()
 
@@ -891,7 +922,7 @@ CREATE TABLE bench.insert_distinct (
 						fmt.Fprintf(&buf, "(%d, %d)", zipf.Uint64(), n)
 					}
 
-					if _, err := db.Exec(buf.String()); err != nil {
+					if _, err := db.DB.ExecContext(context.Background(), buf.String()); err != nil {
 						return err
 					}
 				}
@@ -916,16 +947,18 @@ const wideTableSchema = `CREATE TABLE bench.widetable (
   )`
 
 func insertIntoWideTable(
-	b *testing.B, buf bytes.Buffer, i, count, bigColumnBytes int, s *rand.Rand, db *gosql.DB,
+	b *testing.B,
+	buf bytes.Buffer,
+	i, count, bigColumnBytes int,
+	s *rand.Rand,
+	db *sqlutils.SQLRunner,
 ) {
 	buf.WriteString(`INSERT INTO bench.widetable VALUES `)
 	for j := 0; j < count; j++ {
 		if j != 0 {
 			if j%3 == 0 {
 				buf.WriteString(`;`)
-				if _, err := db.Exec(buf.String()); err != nil {
-					b.Fatal(err)
-				}
+				db.Exec(b, buf.String())
 				buf.Reset()
 				buf.WriteString(`INSERT INTO bench.widetable VALUES `)
 			} else {
@@ -948,9 +981,7 @@ func insertIntoWideTable(
 		buf.WriteString(`)`)
 	}
 	buf.WriteString(`;`)
-	if _, err := db.Exec(buf.String()); err != nil {
-		b.Fatal(err)
-	}
+	db.Exec(b, buf.String())
 	buf.Reset()
 }
 
@@ -964,16 +995,12 @@ func insertIntoWideTable(
 // columns in a family may be copied unnecessarily when it's updated. Perfect
 // knowledge of traffic patterns can result in much better heuristics, but we
 // don't have that information at table creation.
-func runBenchmarkWideTable(b *testing.B, db *gosql.DB, count int, bigColumnBytes int) {
+func runBenchmarkWideTable(b *testing.B, db *sqlutils.SQLRunner, count int, bigColumnBytes int) {
 	defer func() {
-		if _, err := db.Exec(`DROP TABLE IF EXISTS bench.widetable`); err != nil {
-			b.Fatal(err)
-		}
+		db.Exec(b, `DROP TABLE IF EXISTS bench.widetable`)
 	}()
 
-	if _, err := db.Exec(wideTableSchema); err != nil {
-		b.Fatal(err)
-	}
+	db.Exec(b, wideTableSchema)
 
 	s := rand.New(rand.NewSource(5432))
 
@@ -1012,20 +1039,48 @@ func runBenchmarkWideTable(b *testing.B, db *gosql.DB, count int, bigColumnBytes
 		}
 		buf.WriteString(`);`)
 
-		if _, err := db.Exec(buf.String()); err != nil {
-			b.Fatal(err)
-		}
+		db.Exec(b, buf.String())
 	}
 	b.StopTimer()
 }
 
+// BenchmarkVecSkipScan benchmarks the vectorized engine's performance
+// when skipping unneeded key values in the decoding process.
+func BenchmarkVecSkipScan(b *testing.B) {
+	defer log.Scope(b).Close(b)
+	benchmarkCockroach(b, func(b *testing.B, db *sqlutils.SQLRunner) {
+		create := `
+CREATE TABLE bench.scan(
+	x INT, y INT, z INT, 
+	a INT, w INT, v INT, 
+	PRIMARY KEY (x, y, z, a, w, v)
+)
+`
+		db.Exec(b, create)
+		const count = 1000
+		for i := 0; i < count; i++ {
+			db.Exec(
+				b,
+				fmt.Sprintf(
+					"INSERT INTO bench.scan VALUES (%d, %d, %d, %d, %d, %d)",
+					i, i, i, i, i, i,
+				),
+			)
+		}
+		b.ResetTimer()
+		b.Run("Bench scan with skip", func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				db.Exec(b, `SET vectorize=on; SELECT y FROM bench.scan`)
+			}
+		})
+	})
+}
+
 func BenchmarkWideTable(b *testing.B) {
-	if testing.Short() {
-		b.Skip("short flag")
-	}
+	skip.UnderShort(b)
 	defer log.Scope(b).Close(b)
 	const count = 10
-	ForEachDB(b, func(b *testing.B, db *gosql.DB) {
+	ForEachDB(b, func(b *testing.B, db *sqlutils.SQLRunner) {
 		b.Run(fmt.Sprintf("count=%d", count), func(b *testing.B) {
 			for _, bigColumnBytes := range []int{10, 100, 1000, 10000, 100000, 1000000} {
 				b.Run(fmt.Sprintf("bigColumnBytes=%d", bigColumnBytes), func(b *testing.B) {
@@ -1037,14 +1092,10 @@ func BenchmarkWideTable(b *testing.B) {
 }
 
 func BenchmarkWideTableIgnoreColumns(b *testing.B) {
-	if testing.Short() {
-		b.Skip("short flag")
-	}
+	skip.UnderShort(b)
 	defer log.Scope(b).Close(b)
-	ForEachDB(b, func(b *testing.B, db *gosql.DB) {
-		if _, err := db.Exec(wideTableSchema); err != nil {
-			b.Fatal(err)
-		}
+	ForEachDB(b, func(b *testing.B, db *sqlutils.SQLRunner) {
+		db.Exec(b, wideTableSchema)
 		var buf bytes.Buffer
 		s := rand.New(rand.NewSource(5432))
 		insertIntoWideTable(b, buf, 0, 10000, 10, s, db)
@@ -1052,22 +1103,18 @@ func BenchmarkWideTableIgnoreColumns(b *testing.B) {
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			if _, err := db.Exec("SELECT count(*) FROM bench.widetable WHERE f4 < 10"); err != nil {
-				b.Fatal(err)
-			}
+			db.Exec(b, "SELECT count(*) FROM bench.widetable WHERE f4 < 10")
 		}
 	})
 }
 
 // BenchmarkPlanning runs some queries on an empty table. The purpose is to
-// benchmark (and get memory allocation statistics) the planning process.
+// benchmark (and get memory allocation statistics for) the planning process.
 func BenchmarkPlanning(b *testing.B) {
-	if testing.Short() {
-		b.Skip("short flag")
-	}
-	ForEachDB(b, func(b *testing.B, db *gosql.DB) {
-		sr := sqlutils.MakeSQLRunner(db)
-		sr.Exec(b, `CREATE TABLE abc (a INT PRIMARY KEY, b INT, c INT, INDEX(b), UNIQUE INDEX(c))`)
+	skip.UnderShort(b)
+	defer log.Scope(b).Close(b)
+	ForEachDB(b, func(b *testing.B, db *sqlutils.SQLRunner) {
+		db.Exec(b, `CREATE TABLE abc (a INT PRIMARY KEY, b INT, c INT, INDEX(b), UNIQUE INDEX(c))`)
 
 		queries := []string{
 			`SELECT * FROM abc`,
@@ -1080,7 +1127,7 @@ func BenchmarkPlanning(b *testing.B) {
 		for _, q := range queries {
 			b.Run(q, func(b *testing.B) {
 				for i := 0; i < b.N; i++ {
-					sr.Exec(b, q)
+					db.Exec(b, q)
 				}
 			})
 		}
@@ -1090,7 +1137,7 @@ func BenchmarkPlanning(b *testing.B) {
 // BenchmarkIndexJoin measure an index-join with 1000 rows.
 func BenchmarkIndexJoin(b *testing.B) {
 	defer log.Scope(b).Close(b)
-	ForEachDB(b, func(b *testing.B, db *gosql.DB) {
+	ForEachDB(b, func(b *testing.B, db *sqlutils.SQLRunner) {
 		// The table will have an extra column not contained in the index to force a
 		// join with the PK.
 		create := `
@@ -1108,25 +1155,19 @@ func BenchmarkIndexJoin(b *testing.B) {
 		// optimizer doesn't know that).
 		insert := "insert into tidx(k,v) select generate_series(1,1000), (random()*1000)::int"
 
-		if _, err := db.Exec(create); err != nil {
-			b.Fatal(err)
-		}
-		if _, err := db.Exec(insert); err != nil {
-			b.Fatal(err)
-		}
+		db.Exec(b, create)
+		db.Exec(b, insert)
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			if _, err := db.Exec("select * from bench.tidx where v < 1000"); err != nil {
-				b.Fatal(err)
-			}
+			db.Exec(b, "select * from bench.tidx where v < 1000")
 		}
 	})
 }
 
 func BenchmarkSortJoinAggregation(b *testing.B) {
 	defer log.Scope(b).Close(b)
-	ForEachDB(b, func(b *testing.B, db *gosql.DB) {
+	ForEachDB(b, func(b *testing.B, db *sqlutils.SQLRunner) {
 		tables := []struct {
 			create   string
 			populate string
@@ -1154,12 +1195,8 @@ func BenchmarkSortJoinAggregation(b *testing.B) {
 		}
 
 		for _, table := range tables {
-			if _, err := db.Exec(table.create); err != nil {
-				b.Fatal(err)
-			}
-			if _, err := db.Exec(table.populate); err != nil {
-				b.Fatal(err)
-			}
+			db.Exec(b, table.create)
+			db.Exec(b, table.populate)
 		}
 
 		query := `
@@ -1173,9 +1210,23 @@ func BenchmarkSortJoinAggregation(b *testing.B) {
 
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if _, err := db.Exec(query); err != nil {
-				b.Fatal(err)
-			}
+			db.Exec(b, query)
 		}
+	})
+}
+
+func BenchmarkNameResolution(b *testing.B) {
+	skip.UnderShort(b)
+	defer log.Scope(b).Close(b)
+	ForEachDB(b, func(b *testing.B, db *sqlutils.SQLRunner) {
+		db.Exec(b, `CREATE TABLE namespace (k INT PRIMARY KEY, v INT)`)
+		db.Exec(b, `INSERT INTO namespace VALUES(1, 2)`)
+
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			db.Exec(b, "SELECT * FROM namespace")
+		}
+		b.StopTimer()
 	})
 }

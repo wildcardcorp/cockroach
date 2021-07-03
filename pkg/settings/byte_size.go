@@ -1,22 +1,18 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package settings
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
-	"github.com/pkg/errors"
+	"github.com/cockroachdb/errors"
 )
 
 // ByteSizeSetting is the interface of a setting variable that will be
@@ -26,7 +22,7 @@ type ByteSizeSetting struct {
 	IntSetting
 }
 
-var _ Setting = &ByteSizeSetting{}
+var _ extendedSetting = &ByteSizeSetting{}
 
 // Typ returns the short (1 char) string denoting the type of setting.
 func (*ByteSizeSetting) Typ() string {
@@ -37,16 +33,36 @@ func (b *ByteSizeSetting) String(sv *Values) string {
 	return humanizeutil.IBytes(b.Get(sv))
 }
 
-// RegisterByteSizeSetting defines a new setting with type bytesize.
-func RegisterByteSizeSetting(key, desc string, defaultValue int64) *ByteSizeSetting {
-	return RegisterValidatedByteSizeSetting(key, desc, defaultValue, nil)
+// WithPublic sets public visibility and can be chained.
+func (b *ByteSizeSetting) WithPublic() *ByteSizeSetting {
+	b.SetVisibility(Public)
+	return b
 }
 
-// RegisterValidatedByteSizeSetting defines a new setting with type bytesize
-// with a validation function.
-func RegisterValidatedByteSizeSetting(
-	key, desc string, defaultValue int64, validateFn func(int64) error,
+// WithSystemOnly marks this setting as system-only and can be chained.
+func (b *ByteSizeSetting) WithSystemOnly() *ByteSizeSetting {
+	b.common.systemOnly = true
+	return b
+}
+
+// RegisterByteSizeSetting defines a new setting with type bytesize and any
+// supplied validation function(s).
+func RegisterByteSizeSetting(
+	key, desc string, defaultValue int64, validateFns ...func(int64) error,
 ) *ByteSizeSetting {
+
+	var validateFn func(int64) error
+	if len(validateFns) > 0 {
+		validateFn = func(v int64) error {
+			for _, fn := range validateFns {
+				if err := fn(v); err != nil {
+					return errors.Wrapf(err, "invalid value for %s", key)
+				}
+			}
+			return nil
+		}
+	}
+
 	if validateFn != nil {
 		if err := validateFn(defaultValue); err != nil {
 			panic(errors.Wrap(err, "invalid default"))

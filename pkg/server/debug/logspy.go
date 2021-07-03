@@ -1,23 +1,18 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package debug
 
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -26,10 +21,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/util/caller"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/log/channel"
+	"github.com/cockroachdb/cockroach/pkg/util/log/logpb"
+	"github.com/cockroachdb/cockroach/pkg/util/log/severity"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
-	"github.com/pkg/errors"
+	"github.com/cockroachdb/errors"
 )
 
 // regexpAsString wraps a *regexp.Regexp for better printing and
@@ -94,7 +91,6 @@ func (d durationAsString) String() string {
 
 const (
 	logSpyDefaultDuration = durationAsString(5 * time.Second)
-	logSpyMaxCount        = 10000
 	logSpyDefaultCount    = 1000
 	logSpyChanCap         = 4096
 )
@@ -126,11 +122,6 @@ func logSpyOptionsFromValues(values url.Values) (logSpyOptions, error) {
 
 	if opts.Count == 0 {
 		opts.Count = logSpyDefaultCount
-	} else if opts.Count > logSpyMaxCount {
-		return logSpyOptions{}, errors.Errorf(
-			"count %d is too large (limit is %d); consider restricting your filter",
-			opts.Count, logSpyMaxCount,
-		)
 	}
 	return opts, nil
 }
@@ -157,7 +148,7 @@ func (spy *logSpy) handleDebugLogSpy(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if err := spy.run(ctx, w, opts); err != nil {
 		// This is likely a broken HTTP connection, so nothing too unexpected.
-		log.Info(ctx, err)
+		log.Infof(ctx, "%v", err)
 	}
 }
 
@@ -169,11 +160,11 @@ func (spy *logSpy) run(ctx context.Context, w io.Writer, opts logSpyOptions) (er
 	defer func() {
 		if err == nil {
 			if dropped := atomic.LoadInt32(&countDropped); dropped > 0 {
-				f, l, _ := caller.Lookup(0)
-				entry := log.MakeEntry(
-					log.Severity_WARNING, timeutil.Now().UnixNano(), f, l,
-					fmt.Sprintf("%d messages were dropped", dropped))
-				err = entry.Format(w) // modify return value
+				entry := log.MakeLegacyEntry(
+					ctx, severity.WARNING, channel.DEV,
+					0 /* depth */, true, /* redactable */
+					"%d messages were dropped", log.Safe(dropped))
+				err = log.FormatLegacyEntry(entry, w) // modify return value
 			}
 		}
 	}()
@@ -182,19 +173,20 @@ func (spy *logSpy) run(ctx context.Context, w io.Writer, opts logSpyOptions) (er
 	// because we don't know when that is safe. This is sketchy in general but
 	// OK here since we don't have to guarantee that the channel is fully
 	// consumed.
-	entries := make(chan log.Entry, logSpyChanCap)
+	entries := make(chan logpb.Entry, logSpyChanCap)
 
 	{
-		f, l, _ := caller.Lookup(0)
-		entry := log.MakeEntry(
-			log.Severity_INFO, timeutil.Now().UnixNano(), f, l,
-			fmt.Sprintf("intercepting logs with options %+v", opts))
+		entry := log.MakeLegacyEntry(
+			ctx, severity.INFO, channel.DEV,
+			0 /* depth */, true, /* redactable */
+			"intercepting logs with options %+v", opts)
 		entries <- entry
 	}
 
-	spy.setIntercept(ctx, func(entry log.Entry) {
+	spy.setIntercept(ctx, func(entry logpb.Entry) {
 		if re := opts.Grep.re; re != nil {
 			switch {
+			case re.MatchString(entry.Tags):
 			case re.MatchString(entry.Message):
 			case re.MatchString(entry.File):
 			case opts.Grep.i != 0 && opts.Grep.i == entry.Goroutine:
@@ -223,10 +215,10 @@ func (spy *logSpy) run(ctx context.Context, w io.Writer, opts logSpyOptions) (er
 	for {
 		select {
 		case <-done:
-
 			return
+
 		case entry := <-entries:
-			if err := entry.Format(w); err != nil {
+			if err := log.FormatLegacyEntry(entry, w); err != nil {
 				return errors.Wrapf(err, "while writing entry %v", entry)
 			}
 			count++
@@ -236,6 +228,7 @@ func (spy *logSpy) run(ctx context.Context, w io.Writer, opts logSpyOptions) (er
 			if done == nil {
 				done = ctx.Done()
 			}
+
 		case <-flushTimer.C:
 			flushTimer.Read = true
 			flushTimer.Reset(flushInterval)

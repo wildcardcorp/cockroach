@@ -1,16 +1,12 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package xform
 
@@ -90,18 +86,22 @@ type explorer struct {
 	mem     *memo.Memo
 
 	// funcs is the struct used to call all custom match and replace functions
-	// used by the exploration rules. It wraps an unnamed xfunc.CustomFuncs,
-	// so it provides a clean interface for calling functions from both the xform
-	// and xfunc packages using the same prefix.
+	// used by the exploration rules. It wraps an unnamed norm.CustomFuncs, so
+	// it provides a clean interface for calling functions from both the xform
+	// and norm packages using the same prefix.
 	funcs CustomFuncs
 }
 
 // init initializes the explorer for use (or reuse).
 func (e *explorer) init(o *Optimizer) {
-	e.evalCtx = o.evalCtx
-	e.o = o
-	e.f = o.Factory()
-	e.mem = o.mem
+	// This initialization pattern ensures that fields are not unwittingly
+	// reused. Field reuse must be explicit.
+	*e = explorer{
+		evalCtx: o.evalCtx,
+		o:       o,
+		f:       o.Factory(),
+		mem:     o.mem,
+	}
 	e.funcs.Init(e)
 }
 

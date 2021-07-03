@@ -1,32 +1,36 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
-import React from "react";
-import { createSelector } from "reselect";
-import { connect } from "react-redux";
 import _ from "lodash";
 import Long from "long";
 import moment from "moment";
-
-import * as protos from  "src/js/protos";
-import { AdminUIState } from "src/redux/state";
-import { requestMetrics as requestMetricsAction, MetricsQuery } from "src/redux/metrics";
+import React from "react";
+import { connect } from "react-redux";
+import { createSelector } from "reselect";
+import * as protos from "src/js/protos";
 import {
-  Metric, MetricProps, MetricsDataComponentProps, QueryTimeInfo,
-} from "src/views/shared/components/metricQuery";
-import { findChildrenOfType } from "src/util/find";
+  MetricsQuery,
+  requestMetrics as requestMetricsAction,
+} from "src/redux/metrics";
+import { AdminUIState } from "src/redux/state";
 import { MilliToNano } from "src/util/convert";
+import { findChildrenOfType } from "src/util/find";
+import {
+  Metric,
+  MetricProps,
+  MetricsDataComponentProps,
+  QueryTimeInfo,
+} from "src/views/shared/components/metricQuery";
+import { PayloadAction } from "src/interfaces/action";
+import { TimeWindow, TimeScale } from "src/redux/timewindow";
+import { History } from "history";
 
 /**
  * queryFromProps is a helper method which generates a TimeSeries Query data
@@ -36,44 +40,46 @@ function queryFromProps(
   metricProps: MetricProps,
   graphProps: MetricsDataComponentProps,
 ): protos.cockroach.ts.tspb.IQuery {
-    let derivative = protos.cockroach.ts.tspb.TimeSeriesQueryDerivative.NONE;
-    let sourceAggregator = protos.cockroach.ts.tspb.TimeSeriesQueryAggregator.SUM;
-    let downsampler = protos.cockroach.ts.tspb.TimeSeriesQueryAggregator.AVG;
+  let derivative = protos.cockroach.ts.tspb.TimeSeriesQueryDerivative.NONE;
+  let sourceAggregator = protos.cockroach.ts.tspb.TimeSeriesQueryAggregator.SUM;
+  let downsampler = protos.cockroach.ts.tspb.TimeSeriesQueryAggregator.AVG;
 
-    // Compute derivative function.
-    if (!_.isNil(metricProps.derivative)) {
-      derivative = metricProps.derivative;
-    } else if (metricProps.rate) {
-      derivative = protos.cockroach.ts.tspb.TimeSeriesQueryDerivative.DERIVATIVE;
-    } else if (metricProps.nonNegativeRate) {
-      derivative = protos.cockroach.ts.tspb.TimeSeriesQueryDerivative.NON_NEGATIVE_DERIVATIVE;
-    }
-    // Compute downsample function.
-    if (!_.isNil(metricProps.downsampler)) {
-      downsampler = metricProps.downsampler;
-    } else if (metricProps.downsampleMax) {
-      downsampler = protos.cockroach.ts.tspb.TimeSeriesQueryAggregator.MAX;
-    } else if (metricProps.downsampleMin) {
-      downsampler = protos.cockroach.ts.tspb.TimeSeriesQueryAggregator.MIN;
-    }
-    // Compute aggregation function.
-    if (!_.isNil(metricProps.aggregator)) {
-      sourceAggregator = metricProps.aggregator;
-    } else if (metricProps.aggregateMax) {
-      sourceAggregator = protos.cockroach.ts.tspb.TimeSeriesQueryAggregator.MAX;
-    } else if (metricProps.aggregateMin) {
-      sourceAggregator = protos.cockroach.ts.tspb.TimeSeriesQueryAggregator.MIN;
-    } else if (metricProps.aggregateAvg) {
-      sourceAggregator = protos.cockroach.ts.tspb.TimeSeriesQueryAggregator.AVG;
-    }
+  // Compute derivative function.
+  if (!_.isNil(metricProps.derivative)) {
+    derivative = metricProps.derivative;
+  } else if (metricProps.rate) {
+    derivative = protos.cockroach.ts.tspb.TimeSeriesQueryDerivative.DERIVATIVE;
+  } else if (metricProps.nonNegativeRate) {
+    derivative =
+      protos.cockroach.ts.tspb.TimeSeriesQueryDerivative
+        .NON_NEGATIVE_DERIVATIVE;
+  }
+  // Compute downsample function.
+  if (!_.isNil(metricProps.downsampler)) {
+    downsampler = metricProps.downsampler;
+  } else if (metricProps.downsampleMax) {
+    downsampler = protos.cockroach.ts.tspb.TimeSeriesQueryAggregator.MAX;
+  } else if (metricProps.downsampleMin) {
+    downsampler = protos.cockroach.ts.tspb.TimeSeriesQueryAggregator.MIN;
+  }
+  // Compute aggregation function.
+  if (!_.isNil(metricProps.aggregator)) {
+    sourceAggregator = metricProps.aggregator;
+  } else if (metricProps.aggregateMax) {
+    sourceAggregator = protos.cockroach.ts.tspb.TimeSeriesQueryAggregator.MAX;
+  } else if (metricProps.aggregateMin) {
+    sourceAggregator = protos.cockroach.ts.tspb.TimeSeriesQueryAggregator.MIN;
+  } else if (metricProps.aggregateAvg) {
+    sourceAggregator = protos.cockroach.ts.tspb.TimeSeriesQueryAggregator.AVG;
+  }
 
-    return {
-      name: metricProps.name,
-      sources: metricProps.sources || graphProps.sources || undefined,
-      downsampler: downsampler,
-      source_aggregator: sourceAggregator,
-      derivative: derivative,
-    };
+  return {
+    name: metricProps.name,
+    sources: metricProps.sources || graphProps.sources || undefined,
+    downsampler: downsampler,
+    source_aggregator: sourceAggregator,
+    derivative: derivative,
+  };
 }
 
 /**
@@ -84,6 +90,9 @@ interface MetricsDataProviderConnectProps {
   metrics: MetricsQuery;
   timeInfo: QueryTimeInfo;
   requestMetrics: typeof requestMetricsAction;
+  setTimeRange?: (tw: TimeWindow) => PayloadAction<TimeWindow>;
+  setTimeScale?: (ts: TimeScale) => PayloadAction<TimeScale>;
+  history?: History;
 }
 
 /**
@@ -94,13 +103,15 @@ interface MetricsDataProviderExplicitProps {
   id: string;
   // If current is true, uses the current time instead of the global timewindow.
   current?: boolean;
+  children?: React.ReactElement<{}>;
 }
 
 /**
  * MetricsDataProviderProps is the complete set of properties which can be
  * provided to a MetricsDataProvider.
  */
-type MetricsDataProviderProps = MetricsDataProviderConnectProps & MetricsDataProviderExplicitProps;
+type MetricsDataProviderProps = MetricsDataProviderConnectProps &
+  MetricsDataProviderExplicitProps;
 
 /**
  * MetricsDataProvider is a container which manages query data for a renderable
@@ -125,17 +136,26 @@ type MetricsDataProviderProps = MetricsDataProviderConnectProps & MetricsDataPro
  * property, that determines the window over which time series should be
  * queried. This property is also currently intended to be set via react-redux.
  */
-class MetricsDataProvider extends React.Component<MetricsDataProviderProps, {}> {
+class MetricsDataProvider extends React.Component<
+  MetricsDataProviderProps,
+  {}
+> {
   private queriesSelector = createSelector(
-    (props: MetricsDataProviderProps & {children?: React.ReactNode}) => props.children,
+    ({ children }: MetricsDataProviderProps) => children,
     (children) => {
       // MetricsDataProvider should contain only one direct child.
-      const child: React.ReactElement<MetricsDataComponentProps> = React.Children.only(this.props.children);
+      const child: React.ReactElement<MetricsDataComponentProps> = React.Children.only(
+        this.props.children,
+      );
       // Perform a simple DFS to find all children which are Metric objects.
-      const selectors: React.ReactElement<MetricProps>[] = findChildrenOfType(children, Metric);
+      const selectors: React.ReactElement<MetricProps>[] = findChildrenOfType(
+        children,
+        Metric,
+      );
       // Construct a query for each found selector child.
       return _.map(selectors, (s) => queryFromProps(s.props, child.props));
-    });
+    },
+  );
 
   private requestMessage = createSelector(
     (props: MetricsDataProviderProps) => props.timeInfo,
@@ -150,7 +170,8 @@ class MetricsDataProvider extends React.Component<MetricsDataProviderProps, {}> 
         sample_nanos: timeInfo.sampleDuration,
         queries,
       });
-    });
+    },
+  );
 
   /**
    * Refresh nodes status query when props are changed; this will immediately
@@ -168,22 +189,26 @@ class MetricsDataProvider extends React.Component<MetricsDataProviderProps, {}> 
     }
   }
 
-  componentWillMount() {
+  componentDidMount() {
     // Refresh nodes status query when mounting.
     this.refreshMetricsIfStale(this.props);
   }
 
-  componentWillReceiveProps(props: MetricsDataProviderProps) {
+  componentDidUpdate() {
     // Refresh nodes status query when props are received; this will immediately
     // trigger a new request if previous results are invalidated.
-    this.refreshMetricsIfStale(props);
+    this.refreshMetricsIfStale(this.props);
   }
 
   getData() {
     if (this.props.metrics) {
       const { data, request } = this.props.metrics;
       // Do not attach data if queries are not equivalent.
-      if (data && request && _.isEqual(request.queries, this.requestMessage(this.props).queries)) {
+      if (
+        data &&
+        request &&
+        _.isEqual(request.queries, this.requestMessage(this.props).queries)
+      ) {
         return data;
       }
     }
@@ -196,8 +221,14 @@ class MetricsDataProvider extends React.Component<MetricsDataProviderProps, {}> 
     const dataProps: MetricsDataComponentProps = {
       data: this.getData(),
       timeInfo: this.props.timeInfo,
+      setTimeRange: this.props.setTimeRange,
+      setTimeScale: this.props.setTimeScale,
+      history: this.props.history,
     };
-    return React.cloneElement(child as React.ReactElement<MetricsDataComponentProps>, dataProps);
+    return React.cloneElement(
+      child as React.ReactElement<MetricsDataComponentProps>,
+      dataProps,
+    );
   }
 }
 
@@ -212,25 +243,31 @@ const timeInfoSelector = createSelector(
     return {
       start: Long.fromNumber(MilliToNano(tw.currentWindow.start.valueOf())),
       end: Long.fromNumber(MilliToNano(tw.currentWindow.end.valueOf())),
-      sampleDuration: Long.fromNumber(MilliToNano(tw.scale.sampleSize.asMilliseconds())),
+      sampleDuration: Long.fromNumber(
+        MilliToNano(tw.scale.sampleSize.asMilliseconds()),
+      ),
     };
-  });
+  },
+);
 
 const current = () => {
   let now = moment();
   // Round to the nearest 10 seconds. There are 10000 ms in 10 s.
   now = moment(Math.floor(now.valueOf() / 10000) * 10000);
   return {
-    start: Long.fromNumber(MilliToNano(now.clone().subtract(30, "s").valueOf())),
+    start: Long.fromNumber(
+      MilliToNano(now.clone().subtract(30, "s").valueOf()),
+    ),
     end: Long.fromNumber(MilliToNano(now.valueOf())),
-    sampleDuration: Long.fromNumber(MilliToNano(moment.duration(10, "s").asMilliseconds())),
+    sampleDuration: Long.fromNumber(
+      MilliToNano(moment.duration(10, "s").asMilliseconds()),
+    ),
   };
 };
 
 // Connect the MetricsDataProvider class to redux state.
 const metricsDataProviderConnected = connect(
   (state: AdminUIState, ownProps: MetricsDataProviderExplicitProps) => {
-
     return {
       metrics: state.metrics.queries[ownProps.id],
       timeInfo: ownProps.current ? current() : timeInfoSelector(state),
@@ -242,8 +279,6 @@ const metricsDataProviderConnected = connect(
 )(MetricsDataProvider);
 
 export {
-  // Export original, unconnected MetricsDataProvider for effective unit
-  // testing.
   MetricsDataProvider as MetricsDataProviderUnconnected,
   metricsDataProviderConnected as MetricsDataProvider,
 };

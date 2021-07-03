@@ -1,16 +1,12 @@
 // Copyright 2017 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
 package sql
 
@@ -19,18 +15,21 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/security"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/types"
-	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
+	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/errors"
 )
 
 type showFingerprintsNode struct {
 	optColumnsSlot
 
-	tableDesc *sqlbase.ImmutableTableDescriptor
-	indexes   []sqlbase.IndexDescriptor
+	tableDesc catalog.TableDescriptor
+	indexes   []*descpb.IndexDescriptor
 
 	run showFingerprintsRun
 }
@@ -56,8 +55,8 @@ func (p *planner) ShowFingerprints(
 ) (planNode, error) {
 	// We avoid the cache so that we can observe the fingerprints without
 	// taking a lease, like other SHOW commands.
-	tableDesc, err := p.ResolveUncachedTableDescriptor(
-		ctx, &n.Table, true /*required*/, requireTableDesc)
+	tableDesc, err := p.ResolveUncachedTableDescriptorEx(
+		ctx, n.Table, true /*required*/, tree.ResolveRequireTableDesc)
 	if err != nil {
 		return nil, err
 	}
@@ -66,15 +65,16 @@ func (p *planner) ShowFingerprints(
 		return nil, err
 	}
 
+	indexes := tableDesc.NonDropIndexes()
+	indexDescs := make([]*descpb.IndexDescriptor, len(indexes))
+	for i, index := range indexes {
+		indexDescs[i] = index.IndexDesc()
+	}
+
 	return &showFingerprintsNode{
 		tableDesc: tableDesc,
-		indexes:   tableDesc.AllNonDropIndexes(),
+		indexes:   indexDescs,
 	}, nil
-}
-
-var showFingerprintsColumns = sqlbase.ResultColumns{
-	{Name: "index_name", Typ: types.String},
-	{Name: "fingerprint", Typ: types.String},
 }
 
 // showFingerprintsRun contains the run-time state of
@@ -96,28 +96,27 @@ func (n *showFingerprintsNode) Next(params runParams) (bool, error) {
 	}
 	index := n.indexes[n.run.rowIdx]
 
-	cols := make([]string, 0, len(n.tableDesc.Columns))
-	addColumn := func(col *sqlbase.ColumnDescriptor) {
+	cols := make([]string, 0, len(n.tableDesc.PublicColumns()))
+	addColumn := func(col *descpb.ColumnDescriptor) {
 		// TODO(dan): This is known to be a flawed way to fingerprint. Any datum
 		// with the same string representation is fingerprinted the same, even
 		// if they're different types.
-		switch col.Type.SemanticType {
-		case sqlbase.ColumnType_BYTES:
+		switch col.Type.Family() {
+		case types.BytesFamily:
 			cols = append(cols, fmt.Sprintf("%s:::bytes", tree.NameStringP(&col.Name)))
 		default:
 			cols = append(cols, fmt.Sprintf("%s::string::bytes", tree.NameStringP(&col.Name)))
 		}
 	}
 
-	if index.ID == n.tableDesc.PrimaryIndex.ID {
-		for i := range n.tableDesc.Columns {
-			addColumn(&n.tableDesc.Columns[i])
+	if index.ID == n.tableDesc.GetPrimaryIndexID() {
+		for _, col := range n.tableDesc.PublicColumns() {
+			addColumn(col.ColumnDesc())
 		}
 	} else {
-		colsByID := make(map[sqlbase.ColumnID]*sqlbase.ColumnDescriptor)
-		for i := range n.tableDesc.Columns {
-			col := &n.tableDesc.Columns[i]
-			colsByID[col.ID] = col
+		colsByID := make(map[descpb.ColumnID]*descpb.ColumnDescriptor)
+		for _, col := range n.tableDesc.PublicColumns() {
+			colsByID[col.GetID()] = col.ColumnDesc()
 		}
 		colIDs := append(append(index.ColumnIDs, index.ExtraColumnIDs...), index.StoreColumnIDs...)
 		for _, colID := range colIDs {
@@ -140,18 +139,19 @@ func (n *showFingerprintsNode) Next(params runParams) (bool, error) {
 	sql := fmt.Sprintf(`SELECT
 	  xor_agg(fnv64(%s))::string AS fingerprint
 	  FROM [%d AS t]@{FORCE_INDEX=[%d]}
-	`, strings.Join(cols, `,`), n.tableDesc.ID, index.ID)
+	`, strings.Join(cols, `,`), n.tableDesc.GetID(), index.ID)
 	// If were'in in an AOST context, propagate it to the inner statement so that
 	// the inner statement gets planned with planner.avoidCachedDescriptors set,
 	// like the outter one.
 	if params.p.semaCtx.AsOfTimestamp != nil {
-		ts := params.p.txn.OrigTimestamp()
+		ts := params.p.txn.ReadTimestamp()
 		sql = sql + " AS OF SYSTEM TIME " + ts.AsOfSystemTime()
 	}
 
-	fingerprintCols, err := params.extendedEvalCtx.ExecCfg.InternalExecutor.QueryRow(
+	fingerprintCols, err := params.extendedEvalCtx.ExecCfg.InternalExecutor.QueryRowEx(
 		params.ctx, "hash-fingerprint",
 		params.p.txn,
+		sessiondata.InternalExecutorOverride{User: security.RootUserName()},
 		sql,
 	)
 	if err != nil {
@@ -159,7 +159,7 @@ func (n *showFingerprintsNode) Next(params runParams) (bool, error) {
 	}
 
 	if len(fingerprintCols) != 1 {
-		return false, pgerror.NewAssertionErrorf(
+		return false, errors.AssertionFailedf(
 			"unexpected number of columns returned: 1 vs %d",
 			len(fingerprintCols))
 	}

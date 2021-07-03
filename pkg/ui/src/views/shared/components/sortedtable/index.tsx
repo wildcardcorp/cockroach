@@ -1,25 +1,29 @@
 // Copyright 2018 The Cockroach Authors.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// Use of this software is governed by the Business Source License
+// included in the file licenses/BSL.txt.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0, included in the file
+// licenses/APL.txt.
 
-import React from "react";
 import _ from "lodash";
 import * as Long from "long";
 import { Moment } from "moment";
+import React from "react";
 import { createSelector } from "reselect";
+import {
+  ExpandableConfig,
+  SortableColumn,
+  SortableTable,
+  SortSetting,
+} from "src/views/shared/components/sortabletable";
 
-import { SortableTable, SortableColumn, SortSetting } from "src/views/shared/components/sortabletable";
-import { ExpandableConfig } from "src/views/shared/components/sortabletable";
+export interface ISortedTablePagination {
+  current: number;
+  pageSize: number;
+}
 
 /**
  * ColumnDescriptor is used to describe metadata about an individual column
@@ -42,6 +46,7 @@ export interface ColumnDescriptor<T> {
   rollup?: (objs: T[]) => React.ReactNode;
   // className to be applied to the td elements in this column.
   className?: string;
+  titleAlign?: "left" | "right" | "center";
 }
 
 /**
@@ -76,6 +81,12 @@ interface SortedTableProps<T> {
     // purposes of tracking whether it's expanded or not.
     expansionKey: (obj: T) => string;
   };
+  drawer?: boolean;
+  firstCellBordered?: boolean;
+  renderNoResult?: React.ReactNode;
+  pagination?: ISortedTablePagination;
+  loading?: boolean;
+  loadingLabel?: string;
 }
 
 interface SortedTableState {
@@ -93,7 +104,10 @@ interface SortedTableState {
  * SortedTable should be preferred over the lower-level SortableTable when
  * all data rows to be displayed are available locally on the client side.
  */
-export class SortedTable<T> extends React.Component<SortedTableProps<T>, SortedTableState> {
+export class SortedTable<T> extends React.Component<
+  SortedTableProps<T>,
+  SortedTableState
+> {
   static defaultProps: Partial<SortedTableProps<any>> = {
     rowClass: (_obj: any) => "",
   };
@@ -102,28 +116,58 @@ export class SortedTable<T> extends React.Component<SortedTableProps<T>, SortedT
     (props: SortedTableProps<T>) => props.data,
     (props: SortedTableProps<T>) => props.columns,
     (data: T[], columns: ColumnDescriptor<T>[]) => {
-      return _.map(columns, (c): React.ReactNode => {
-        if (c.rollup) {
-          return c.rollup(data);
-        }
-        return undefined;
-      });
+      return _.map(
+        columns,
+        (c): React.ReactNode => {
+          if (c.rollup) {
+            return c.rollup(data);
+          }
+          return undefined;
+        },
+      );
     },
   );
 
-  sorted = createSelector(
+  paginatedData = (pagination?: ISortedTablePagination, sortData?: T[]) => {
+    const { data } = this.props;
+    if (!pagination) {
+      return sortData || data;
+    }
+    const currentDefault = pagination.current - 1;
+    const start = currentDefault * pagination.pageSize;
+    const end = currentDefault * pagination.pageSize + pagination.pageSize;
+    const pdata = sortData
+      ? sortData.slice(start, end)
+      : data.slice(start, end);
+    return pdata;
+  };
+
+  sortedAndPaginated = createSelector(
     (props: SortedTableProps<T>) => props.data,
     (props: SortedTableProps<T>) => props.sortSetting,
     (props: SortedTableProps<T>) => props.columns,
-    (data: T[], sortSetting: SortSetting, columns: ColumnDescriptor<T>[]): T[] => {
+    (props: SortedTableProps<T>) => props.pagination,
+    (
+      data: T[],
+      sortSetting: SortSetting,
+      columns: ColumnDescriptor<T>[],
+      pagination: ISortedTablePagination,
+    ): T[] => {
       if (!sortSetting) {
-        return data;
+        return this.paginatedData(pagination);
       }
       const sortColumn = columns[sortSetting.sortKey];
       if (!sortColumn || !sortColumn.sort) {
-        return data;
+        return this.paginatedData(pagination);
       }
-      return _.orderBy(data, sortColumn.sort, sortSetting.ascending ? "asc" : "desc");
+      return this.paginatedData(
+        pagination,
+        _.orderBy(
+          data,
+          sortColumn.sort,
+          sortSetting.ascending ? "asc" : "desc",
+        ),
+      );
     },
   );
 
@@ -132,23 +176,32 @@ export class SortedTable<T> extends React.Component<SortedTableProps<T>, SortedT
    * sortableTable.
    */
   columns = createSelector(
-    this.sorted,
+    this.sortedAndPaginated,
     this.rollups,
     (props: SortedTableProps<T>) => props.columns,
-    (sorted: T[], rollups: React.ReactNode[], columns: ColumnDescriptor<T>[]) => {
-      return _.map(columns, (cd, ii): SortableColumn => {
-        return {
-          title: cd.title,
-          cell: (index) => cd.cell(sorted[index]),
-          sortKey: cd.sort ? ii : undefined,
-          rollup: rollups[ii],
-          className: cd.className,
-        };
-      });
-    });
+    (
+      sorted: T[],
+      rollups: React.ReactNode[],
+      columns: ColumnDescriptor<T>[],
+    ) => {
+      return _.map(
+        columns,
+        (cd, ii): SortableColumn => {
+          return {
+            title: cd.title,
+            cell: (index) => cd.cell(sorted[index]),
+            sortKey: cd.sort ? ii : undefined,
+            rollup: rollups[ii],
+            className: cd.className,
+            titleAlign: cd.titleAlign,
+          };
+        },
+      );
+    },
+  );
 
   rowClass = createSelector(
-    this.sorted,
+    this.sortedAndPaginated,
     (props: SortedTableProps<T>) => props.rowClass,
     (sorted: T[], rowClass: (obj: T) => string) => {
       return (index: number) => rowClass(sorted[index]);
@@ -162,12 +215,12 @@ export class SortedTable<T> extends React.Component<SortedTableProps<T>, SortedT
   };
 
   getItemAt(rowIndex: number): T {
-    const sorted = this.sorted(this.props);
+    const sorted = this.sortedAndPaginated(this.props);
     return sorted[rowIndex];
   }
 
   getKeyAt(rowIndex: number): string {
-    return this.props.expandableConfig.expansionKey(this.getItemAt((rowIndex)));
+    return this.props.expandableConfig.expansionKey(this.getItemAt(rowIndex));
   }
 
   onChangeExpansion = (rowIndex: number, expanded: boolean) => {
@@ -181,21 +234,28 @@ export class SortedTable<T> extends React.Component<SortedTableProps<T>, SortedT
     this.setState({
       expandedRows: expandedRows,
     });
-  }
+  };
 
   rowIsExpanded = (rowIndex: number): boolean => {
     const key = this.getKeyAt(rowIndex);
     return this.state.expandedRows.has(key);
-  }
+  };
 
   expandedContent = (rowIndex: number): React.ReactNode => {
     const item = this.getItemAt(rowIndex);
     return this.props.expandableConfig.expandedContent(item);
-  }
+  };
 
   render() {
-    const { data, sortSetting, onChangeSortSetting } = this.props;
-
+    const {
+      data,
+      loading,
+      sortSetting,
+      onChangeSortSetting,
+      firstCellBordered,
+      renderNoResult,
+      loadingLabel,
+    } = this.props;
     let expandableConfig: ExpandableConfig = null;
     if (this.props.expandableConfig) {
       expandableConfig = {
@@ -205,19 +265,23 @@ export class SortedTable<T> extends React.Component<SortedTableProps<T>, SortedT
       };
     }
 
-    if (data) {
-      return (
-        <SortableTable
-          count={data.length}
-          sortSetting={sortSetting}
-          onChangeSortSetting={onChangeSortSetting}
-          columns={this.columns(this.props)}
-          rowClass={this.rowClass(this.props)}
-          className={this.props.className}
-          expandableConfig={expandableConfig}
-        />
-      );
-    }
-    return <div>No results.</div>;
+    const count = data ? this.sortedAndPaginated(this.props).length : 0;
+
+    return (
+      <SortableTable
+        count={count}
+        sortSetting={sortSetting}
+        onChangeSortSetting={onChangeSortSetting}
+        columns={this.columns(this.props)}
+        rowClass={this.rowClass(this.props)}
+        className={this.props.className}
+        expandableConfig={expandableConfig}
+        drawer={this.props.drawer}
+        firstCellBordered={firstCellBordered}
+        renderNoResult={renderNoResult}
+        loading={loading}
+        loadingLabel={loadingLabel}
+      />
+    );
   }
 }
